@@ -23,6 +23,15 @@ class BoolResult(BackendObject):
     def __or__(self, other):
         raise NotImplementedError()
 
+    def identical(self, other):
+        if self.value != other.value:
+            return False
+        if self._op != other._op:
+            return False
+        if self._args != other._args:
+            return False
+        return True
+
     def size(self):
         return None
 
@@ -147,4 +156,4 @@ class MaybeResult(BoolResult):
 
 from ..errors import BackendError
 from .ifproxy import IfProxy
-from ..ast_base import Base
+from ..ast.base import Base

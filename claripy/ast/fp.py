@@ -1,5 +1,5 @@
 from .bits import Bits
-from ..ast_base import Base, _make_name
+from ..ast.base import Base, _make_name
 
 class FP(Bits):
     def to_fp(self, rm, sort):
@@ -13,6 +13,10 @@ class FP(Bits):
 
     def to_bv(self):
         return fpToIEEEBV(self)
+
+    @property
+    def sort(self):
+        return fp.FSort.from_size(self.length)
 
 def FPI(model, **kwargs):
     kwargs['length'] = model.sort.length

@@ -341,16 +341,19 @@ class BackendVSA(Backend):
         else:
             cond_op, cond_arg = cond
             if type(cond_arg.model) in (int, long): #pylint:disable=unidiomatic-typecheck
-                cond_arg = _all_operations.BVV(cond_arg, to_extract.size())
+                cond_arg = _all_operations.BVV(cond_arg, ast.size())
             elif type(cond_arg.model) in (StridedInterval, DiscreteStridedIntervalSet, BVV): #pylint:disable=unidiomatic-typecheck
-                cond_arg = _all_operations.ZeroExt(to_extract.size() - cond_arg.size(), cond_arg)
+                if ast.size() > cond_arg.size():
+                    # Make sure two operands have the same size
+                    cond_arg = _all_operations.ZeroExt(ast.size() - cond_arg.size(), cond_arg)
 
-            if _all_operations.is_true(cond_arg[to_extract.size() - 1 : high + 1] == 0):
+            if to_extract.size() - 1 < high + 1 or \
+                    _all_operations.is_true(cond_arg[to_extract.size() - 1 : high + 1] == 0):
                 # The upper part doesn't matter
                 # We can handle it
                 return self.cts_simplify(ast.op, ast.args, ast, (cond_op, cond_arg))
             else:
-                import ipdb; ipdb.set_trace()
+                # We cannot further simplify it
                 return expr, condition
 
         return new_ifproxy, condition
@@ -370,15 +373,21 @@ class BackendVSA(Backend):
         if len(ifproxy_conds) == 0:
             # Let's check if we can remove this layer of Concat
             cond = condition[1]
-            if len(args) == 2 and \
-                    _all_operations.is_true(args[0] == cond[ cond.size() - 1 : cond.size() - args[0].size() ]):
-                # Yes! We can remove it!
-                # TODO: This is hackish...
-                new_cond = (condition[0], cond[ cond.size() - args[0].size() - 1 : 0])
-                return self.cts_simplify(args[1].op, args[1].args, args[1], new_cond)
+            if len(args) == 2:
+                if cond.size() - 1 >= cond.size() - args[0].size():
+                    if _all_operations.is_true(args[0] == cond[ cond.size() - 1 : cond.size() - args[0].size() ]):
+                        # Yes! We can remove it!
+                        # TODO: This is hackish...
+                        new_cond = (condition[0], cond[ cond.size() - args[0].size() - 1 : 0])
+                        return self.cts_simplify(args[1].op, args[1].args, args[1], new_cond)
 
-            else:
-                return expr, condition
+                else:
+                    # args[0].size() == 0? It must be a bug.
+                    raise ClaripyBackendVSAError(
+                        'args[0].size() == %d (args[0] is \'%s\'). Please report this bug.' % (args[0].size, str(args[0])))
+
+            # Cannot simplify it anymore
+            return expr, condition
 
         elif len(ifproxy_conds) > 1:
             # We have more than one condition. Cannot handle it for now!
@@ -431,12 +440,29 @@ class BackendVSA(Backend):
 
         return expr, condition
 
+    def cts_simplifier___or__(self, args, expr, condition):
+        claripy = expr._claripy
+        argl, argr = args
+        if argl is argr or claripy.is_true(argl == argr):
+            return self.cts_simplify(argl.op, argl.args, argl, condition)
+        elif claripy.is_true(argl == 0):
+            return self.cts_simplify(argr.op, argr.args, argr, condition)
+        elif claripy.is_true(argr == 0):
+            return self.cts_simplify(argl.op, argl.args, argl, condition)
+        else:
+            return expr, condition
+
     def cts_simplifier___and__(self, args, expr, condition):
 
         argl, argr = args
         if argl is argr:
             # Operands are the same one!
             # We can safely remove this layer of __and__
+            return self.cts_simplify(argl.op, argl.args, argl, condition)
+
+        elif argl.structurally_match(argr):
+            # Operands are the same
+            # Safely remove the __and__ operation
             return self.cts_simplify(argl.op, argl.args, argl, condition)
 
         else:
@@ -478,6 +504,9 @@ class BackendVSA(Backend):
             else:
                 return expr, condition
 
+    def cts_simplifier___radd__(self, args, expr, condition):
+        return self.cts_simplifier___add__((args[1], args[0]), expr, condition)
+
     def cts_simplifier___sub__(self, args, expr, condition):
         """
 
@@ -495,6 +524,9 @@ class BackendVSA(Backend):
         else:
             #__import__('ipdb').set_trace()
             return expr, condition
+
+    def cts_simplifier___rsub__(self, args, expr, condition):
+        return self.cts_simplifier___sub__((args[1], args[0]), expr, condition)
 
     def cts_simplifier___rshift__(self, args, expr, condition):
 
@@ -550,11 +582,10 @@ class BackendVSA(Backend):
         :return:
         """
 
-        is_lt, is_equal, is_unsigned = False, False, False # Stop PyCharm from complaining!
         if comp in self.comparison_info:
             is_lt, is_equal, is_unsigned = self.comparison_info[comp]
         else:
-            import ipdb; ipdb.set_trace()
+            raise ClaripyBackendVSAError('Support for comparison %s is not implemented. Please report it.' % comp)
 
         lhs, rhs = args
 
@@ -575,7 +606,50 @@ class BackendVSA(Backend):
             raise ClaripyBackendVSAError('Right-hand-side expression cannot be converted to an AST object.')
 
         if lhs.op == 'If':
-            import ipdb; ipdb.set_trace()
+            condition, trueexpr, falseexpr = lhs.args
+
+            if is_unsigned:
+                if is_lt:
+                    if is_equal:
+                        take_true = _all_operations.is_true(trueexpr.ULE(rhs))
+                        take_false = _all_operations.is_true(falseexpr.ULE(rhs))
+                    else:
+                        take_true = _all_operations.is_true(falseexpr.ULT(rhs))
+                        take_false = _all_operations.is_true(trueexpr.ULT(rhs))
+                else:
+                    if is_equal:
+                        take_true = _all_operations.is_true(trueexpr.UGE(rhs))
+                        take_false = _all_operations.is_true(falseexpr.UGE(rhs))
+                    else:
+                        take_true = _all_operations.is_true(trueexpr.UGT(rhs))
+                        take_false = _all_operations.is_true(falseexpr.UGT(rhs))
+            else:
+                if is_lt:
+                    if is_equal:
+                        take_true = _all_operations.is_true(trueexpr <= rhs)
+                        take_false = _all_operations.is_true(falseexpr <= rhs)
+                    else:
+                        take_true = _all_operations.is_true(trueexpr < rhs)
+                        take_false = _all_operations.is_true(falseexpr < rhs)
+                else:
+                    if is_equal:
+                        take_true = _all_operations.is_true(trueexpr >= rhs)
+                        take_false = _all_operations.is_true(falseexpr >= rhs)
+                    else:
+                        take_true = _all_operations.is_true(trueexpr > rhs)
+                        take_false = _all_operations.is_true(falseexpr > rhs)
+
+            if take_true and take_false:
+                # It's always satisfiable
+                return True, [ ]
+            elif take_true:
+                return self.cts_handle(condition.op, condition.args)
+            elif take_false:
+                rev_op = self.reversed_operations[condition.op]
+                return self.cts_handle(rev_op, condition.args)
+            else:
+                # Not satisfiable
+                return False, [ ]
 
         elif isinstance(rhs.model, StridedInterval) and isinstance(lhs.model, StridedInterval):
             if isinstance(lhs.model, Base):
@@ -605,11 +679,14 @@ class BackendVSA(Backend):
                     # >
                     lb = lb + 1
 
+            if stride == 0 and lb != ub:
+                # Make sure the final StridedInterval is always meaningful. See issue #55.
+                stride = 1
+
             si_replacement = _all_operations.SI(bits=rhs.length, stride=stride, lower_bound=lb, upper_bound=ub)
             return True, [(lhs, si_replacement)]
-        else:
-            #import ipdb; ipdb.set_trace()
 
+        else:
             return True, [ ]
 
     def cts_handler___lt__(self, args): return self.cts_handler_comparison(args, comp='__lt__')
@@ -835,9 +912,16 @@ class BackendVSA(Backend):
                 (original_si, constrained_si).
         """
 
-        sat, lst = self.cts_handle(expr.op, expr.args)
+        try:
+            sat, lst = self.cts_handle(expr.op, expr.args)
 
-        return sat, lst
+            return sat, lst
+
+        except ClaripyVSASimplifierError as ex:
+            l.error('VSASimplifiers raised an exception %s. Please report it.' % str(ex), exc_info=True)
+
+            # return the dummy result
+            return True, [ ]
 
     #
     # Backend Operations
@@ -1054,11 +1138,11 @@ class BackendVSA(Backend):
         return StridedInterval.top(bits, name, uninitialized=uninitialized)
 
 from ..bv import BVV
-from ..ast_base import Base
+from ..ast.base import Base
 from ..operations import backend_operations_vsa_compliant, expression_set_operations
 from ..vsa import StridedInterval, CreateStridedInterval, DiscreteStridedIntervalSet, ValueSet, AbstractLocation, BoolResult, TrueResult, FalseResult
 from ..vsa import IfProxy
-from ..errors import ClaripyBackendVSAError
+from ..errors import ClaripyBackendVSAError, ClaripyVSASimplifierError
 
 from .. import _all_operations
 
