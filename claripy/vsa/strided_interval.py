@@ -6,8 +6,17 @@ import logging
 
 logger = logging.getLogger('claripy.vsa.strided_interval')
 
-from .decorators import expand_ifproxy
 from ..backend_object import BackendObject
+
+def reversed_processor(f):
+    def processor(self, *args):
+        if self._reversed:
+            # Reverse it for real. We have to accept the precision penalty.
+            reversed = self._reverse()
+            return f(reversed, *args)
+        return f(self, *args)
+
+    return processor
 
 def normalize_types(f):
     @functools.wraps(f)
@@ -19,14 +28,12 @@ def normalize_types(f):
         if f.__name__ == 'union' and isinstance(o, DiscreteStridedIntervalSet):
             return o.union(self)
 
-        if isinstance(o, ValueSet) or isinstance(o, IfProxy) or isinstance(o, DiscreteStridedIntervalSet):
+        if isinstance(o, ValueSet) or isinstance(o, DiscreteStridedIntervalSet):
             # It should be put to o.__radd__(self) when o is a ValueSet
             return NotImplemented
 
-        if isinstance(o, Base):
-            o = o.model
-        if isinstance(self, Base):
-            self = o.model
+        if isinstance(o, Base) or isinstance(self, Base):
+            return NotImplemented
         if type(self) is BVV:
             self = self.value
         if type(o) is BVV:
@@ -50,9 +57,11 @@ def normalize_types(f):
             # We are working on two instances that have different endianness!
             # Make sure the `reversed` property of self is kept the same after operation
             if self._reversed:
-                self_reversed = True
-                self = self.copy()
-                self._reversed = False
+                if o.is_integer:
+                    o = o._reverse()
+                else:
+                    self_reversed = True
+                    self = self._reverse()
 
             else:
                 # If self is an integer, we wanna reverse self as well
@@ -93,9 +102,9 @@ class StridedInterval(BackendObject):
             self._name = "SI_%d" % si_id_ctr.next()
 
         self._bits = bits
-        self._stride = stride
-        self._lower_bound = lower_bound
-        self._upper_bound = upper_bound
+        self._stride = stride if stride is not None else 1
+        self._lower_bound = lower_bound if lower_bound is not None else 0
+        self._upper_bound = upper_bound if upper_bound is not None else (2**bits-1)
 
         if lower_bound is not None and type(lower_bound) not in (int, long):
             raise ClaripyVSAError("'lower_bound' must be an int or a long. %s is not supported." % type(lower_bound))
@@ -248,9 +257,19 @@ class StridedInterval(BackendObject):
         north_pole_right = 2 ** (self.bits - 1) # 1000...0
 
         # Is `self` straddling the north pole?
-        if self.lower_bound <= north_pole_left and self.upper_bound >= north_pole_right:
-            # Yes it does!
+        straddling = False
+        if self.upper_bound >= north_pole_right:
+            if self.lower_bound > self.upper_bound:
+                # Yes it does!
+                straddling = True
+            elif self.lower_bound <= north_pole_left:
+                straddling = True
 
+        else:
+            if self.lower_bound > self.upper_bound and self.lower_bound <= north_pole_left:
+                straddling = True
+
+        if straddling:
             a_upper_bound = north_pole_left - ((north_pole_left - self.lower_bound) % self.stride)
             a = StridedInterval(bits=self.bits, stride=self.stride, lower_bound=self.lower_bound, upper_bound=a_upper_bound)
 
@@ -379,9 +398,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -408,9 +427,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -436,9 +455,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -464,9 +483,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -493,9 +512,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -522,9 +541,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -550,9 +569,9 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
@@ -578,13 +597,14 @@ class StridedInterval(BackendObject):
                 else:
                     ret.append(MaybeResult())
 
-        if all([r == TrueResult() for r in ret]):
+        if all(r.identical(TrueResult()) for r in ret):
             return TrueResult()
-        elif all([r == FalseResult() for r in ret]):
+        elif all(r.identical(FalseResult()) for r in ret):
             return FalseResult()
         else:
             return MaybeResult()
 
+    @normalize_types
     def eq(self, o):
         """
         Equal
@@ -627,11 +647,9 @@ class StridedInterval(BackendObject):
         '''
         return self._bits
 
-    @normalize_types
     def __eq__(self, o):
         return self.eq(o)
 
-    @normalize_types
     def __ne__(self, o):
         return ~(self.eq(o))
 
@@ -668,15 +686,12 @@ class StridedInterval(BackendObject):
         """
         return self.ULE(other)
 
-    @normalize_types
     def __add__(self, o):
         return self.add(o)
 
-    @normalize_types
     def __sub__(self, o):
         return self.sub(o)
 
-    @normalize_types
     def __mul__(self, o):
         return self.mul(o)
 
@@ -708,7 +723,6 @@ class StridedInterval(BackendObject):
     def __invert__(self):
         return self.bitwise_not()
 
-    @expand_ifproxy
     @normalize_types
     def __or__(self, other):
         return self.bitwise_or(other)
@@ -720,12 +734,10 @@ class StridedInterval(BackendObject):
     def __rand__(self, other):
         return self.__and__(other)
 
-    @expand_ifproxy
     @normalize_types
     def __xor__(self, other):
         return self.bitwise_xor(other)
 
-    @expand_ifproxy
     def __rxor__(self, other):
         return self.__xor__(other)
 
@@ -738,11 +750,11 @@ class StridedInterval(BackendObject):
     def __repr__(self):
         s = ""
         if self.is_empty:
-            s = '%s<%d>[EmptySI]' % (self._name, self._bits)
+            s = '<%d>[EmptySI]' % (self._bits)
         else:
             lower_bound = self._lower_bound if type(self._lower_bound) == str else '%#x' % self._lower_bound
             upper_bound = self._upper_bound if type(self._upper_bound) == str else '%#x' % self._upper_bound
-            s = '%s<%d>0x%x[%s, %s]%s' % (self._name, self._bits, self._stride,
+            s = '<%d>0x%x[%s, %s]%s' % (self._bits, self._stride,
                                           lower_bound, upper_bound,
                                           'R' if self._reversed else '')
 
@@ -770,13 +782,12 @@ class StridedInterval(BackendObject):
 
     @property
     def cardinality(self):
-        if self.is_integer:
-            if self.is_empty:
-                return 0
-            else:
-                return 1
+        if self.is_bottom:
+            return 0
+        elif self.is_integer:
+            return 1
         else:
-            return (self._modular_sub(self._upper_bound, self._lower_bound, self.bits) + 1) / self._stride
+            return (self._modular_sub(self._upper_bound, self._lower_bound, self.bits) + self._stride) / self._stride
 
     @property
     def lower_bound(self):
@@ -807,6 +818,7 @@ class StridedInterval(BackendObject):
         self._stride = value
 
     @property
+    @reversed_processor
     def max(self):
         if not self.is_empty:
             return self.upper_bound
@@ -815,6 +827,7 @@ class StridedInterval(BackendObject):
             return None
 
     @property
+    @reversed_processor
     def min(self):
         if not self.is_empty:
             return self.lower_bound
@@ -1131,7 +1144,7 @@ class StridedInterval(BackendObject):
 
         max_ = StridedInterval.max_int(bits)
 
-        if (a_lb_positive and a_ub_positive and b_lb_positive and b_ub_positive):
+        if a_lb_positive and a_ub_positive and b_lb_positive and b_ub_positive:
             # [2, 5] * [10, 20] = [20, 100]
             lb = a.lower_bound * b.lower_bound
             ub = a.upper_bound * b.upper_bound
@@ -1143,7 +1156,7 @@ class StridedInterval(BackendObject):
             else:
                 return StridedInterval(bits=bits, stride=stride, lower_bound=lb, upper_bound=ub)
 
-        elif (not a_lb_positive and not a_ub_positive and not b_lb_positive and not b_ub_positive):
+        elif not a_lb_positive and not a_ub_positive and not b_lb_positive and not b_ub_positive:
             # [-5, -2] * [-20, -10] = [20, 100]
             lb = (
                 StridedInterval._unsigned_to_signed(a.upper_bound, bits) *
@@ -1161,7 +1174,7 @@ class StridedInterval(BackendObject):
             else:
                 return StridedInterval(bits=bits, stride=stride, lower_bound=lb, upper_bound=ub)
 
-        elif (not a_lb_positive and not a_ub_positive and b_lb_positive and b_ub_positive):
+        elif not a_lb_positive and not a_ub_positive and b_lb_positive and b_ub_positive:
             # [-10, -2] * [2, 5] = [-50, -4]
             lb = StridedInterval._unsigned_to_signed(a.lower_bound, bits) * b.upper_bound
             ub = StridedInterval._unsigned_to_signed(a.upper_bound, bits) * b.lower_bound
@@ -1173,7 +1186,7 @@ class StridedInterval(BackendObject):
             else:
                 return StridedInterval(bits=bits, stride=stride, lower_bound=lb, upper_bound=ub)
 
-        elif (a_lb_positive and a_ub_positive and not b_lb_positive and not b_ub_positive):
+        elif a_lb_positive and a_ub_positive and not b_lb_positive and not b_ub_positive:
             # [2, 10] * [-5, -2] = [-50, -4]
             lb = a.upper_bound * StridedInterval._unsigned_to_signed(b.lower_bound, bits)
             ub = a.lower_bound * StridedInterval._unsigned_to_signed(b.upper_bound, bits)
@@ -1470,6 +1483,7 @@ class StridedInterval(BackendObject):
     # Arithmetic operations
     #
 
+    @reversed_processor
     def neg(self):
         """
         Unary operation: neg
@@ -1479,6 +1493,7 @@ class StridedInterval(BackendObject):
 
         return StridedInterval(bits=self.bits, stride=0, lower_bound=0, upper_bound=0).sub(self)
 
+    @normalize_types
     def add(self, b):
         """
         Binary operation: add
@@ -1508,6 +1523,7 @@ class StridedInterval(BackendObject):
         return StridedInterval(bits=new_bits, stride=stride, lower_bound=lb, upper_bound=ub,
                                uninitialized=uninitialized)
 
+    @normalize_types
     def sub(self, b):
         """
         Binary operation: sub
@@ -1533,7 +1549,7 @@ class StridedInterval(BackendObject):
 
         return StridedInterval(bits=new_bits, stride=stride, lower_bound=lb, upper_bound=ub,
                                uninitialized=uninitialized)
-
+    @normalize_types
     def mul(self, o):
         """
         Binary operation: multiplication
@@ -1613,6 +1629,7 @@ class StridedInterval(BackendObject):
 
         return ret.normalize()
 
+    @reversed_processor
     def bitwise_not(self):
         """
         Unary operation: bitwise not
@@ -1624,8 +1641,8 @@ class StridedInterval(BackendObject):
         ret = StridedInterval.empty(self.bits)
 
         for si in splitted_si:
-            lb = ~self.upper_bound
-            ub = ~self.lower_bound
+            lb = ~si.upper_bound
+            ub = ~si.lower_bound
             stride = self.stride
 
             tmp = StridedInterval(bits=self.bits, stride=stride, lower_bound=lb, upper_bound=ub)
@@ -1670,6 +1687,7 @@ class StridedInterval(BackendObject):
                     return tmp2 | b
             m = m >> 1
 
+    @normalize_types
     def bitwise_or(self, b):
         """
         Binary operation: logical or
@@ -1688,6 +1706,7 @@ class StridedInterval(BackendObject):
 
         return ret.normalize()
 
+    @normalize_types
     def bitwise_and(self, b):
         """
         Binary operation: logical and
@@ -1706,6 +1725,7 @@ class StridedInterval(BackendObject):
 
         return ret.normalize()
 
+    @normalize_types
     def bitwise_xor(self, b):
         '''
         Operation xor
@@ -1749,6 +1769,7 @@ class StridedInterval(BackendObject):
 
         return lower, upper
 
+    @reversed_processor
     def rshift(self, shift_amount):
         lower, upper = self._pre_shift(shift_amount)
 
@@ -1776,6 +1797,7 @@ class StridedInterval(BackendObject):
 
         return ret
 
+    @reversed_processor
     def lshift(self, shift_amount):
         lower, upper = self._pre_shift(shift_amount)
 
@@ -1803,6 +1825,7 @@ class StridedInterval(BackendObject):
 
         return ret
 
+    @reversed_processor
     def cast_low(self, tok):
         assert tok <= self.bits
 
@@ -1846,6 +1869,7 @@ class StridedInterval(BackendObject):
 
     @normalize_types
     def concat(self, b):
+
         # Zero-extend
         a = self.nameless_copy()
         a._bits += b.bits
@@ -1865,11 +1889,8 @@ class StridedInterval(BackendObject):
         else:
             return new_si.bitwise_or(new_b)
 
+    @reversed_processor
     def extract(self, high_bit, low_bit):
-
-        if self._reversed:
-            reversed = self._reverse()
-            return reversed.extract(high_bit, low_bit)
 
         assert low_bit >= 0
 
@@ -1884,6 +1905,7 @@ class StridedInterval(BackendObject):
 
         return ret.normalize()
 
+    @reversed_processor
     def sign_extend(self, new_length):
         """
         Unary operation: SignExtend
@@ -1936,6 +1958,7 @@ class StridedInterval(BackendObject):
 
         return si
 
+    @reversed_processor
     def zero_extend(self, new_length):
         """
         Unary operation: ZeroExtend
@@ -2319,6 +2342,12 @@ class StridedInterval(BackendObject):
         return ret
 
     def reverse(self):
+        """
+        This is a delayed reversing function. All it really does is to invert the _reversed property of this
+        StridedInterval object.
+
+        :return: None
+        """
         if self.bits == 8:
             # We cannot reverse a one-byte value
             return self.copy()
@@ -2330,7 +2359,8 @@ class StridedInterval(BackendObject):
 
     def _reverse(self):
         """
-        This function does the reversing for real.
+        This method reverses the StridedInterval object for real. Do expect loss of precision for most cases!
+
         :return: A new reversed StridedInterval instance
         """
 
@@ -2366,7 +2396,7 @@ class StridedInterval(BackendObject):
 
             return si
 
-def CreateStridedInterval(name=None, bits=0, stride=None, lower_bound=None, upper_bound=None, to_conv=None):
+def CreateStridedInterval(name=None, bits=0, stride=None, lower_bound=None, upper_bound=None, uninitialized=False, to_conv=None):
     '''
     :param name:
     :param bits:
@@ -2405,7 +2435,8 @@ def CreateStridedInterval(name=None, bits=0, stride=None, lower_bound=None, uppe
                          bits=bits,
                          stride=stride,
                          lower_bound=lower_bound,
-                         upper_bound=upper_bound)
+                         upper_bound=upper_bound,
+                         uninitialized=uninitialized)
     return bi
 
 
@@ -2415,6 +2446,5 @@ from .bool_result import TrueResult, FalseResult, MaybeResult
 from . import discrete_strided_interval_set
 from .discrete_strided_interval_set import DiscreteStridedIntervalSet
 from .valueset import ValueSet
-from .ifproxy import IfProxy
 from ..ast.base import Base
 from ..bv import BVV

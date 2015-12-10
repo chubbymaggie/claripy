@@ -4,14 +4,15 @@ import logging
 l = logging.getLogger("claripy.frontends.frontend")
 
 import ana
+import sys
 
 #pylint:disable=unidiomatic-typecheck
 
 class Frontend(ana.Storable):
-    def __init__(self, solver_backend):
-        self._solver_backend = solver_backend
+    def __init__(self, cache=None):
         self.result = None
         self._simplified = False
+        self._cache = cache is not False
 
     #
     # Storable support
@@ -23,12 +24,20 @@ class Frontend(ana.Storable):
 
     def _ana_getstate(self):
         if not self._simplified: self.simplify()
-        return self._solver_backend.__class__.__name__, self.result
+        return self.result
 
     def _ana_setstate(self, s):
-        solver_backend_name, self.result = s
-        self._solver_backend = _backends[solver_backend_name]
+        self.result = s
         self._simplified = True
+
+    def branch(self):
+        s = self._blank_copy()
+        s.result = self.result
+        s._simplified = self._simplified
+        return s
+
+    def _blank_copy(self):
+        return Frontend(cache=self._cache)
 
     #
     # Constraint management
@@ -76,35 +85,27 @@ class Frontend(ana.Storable):
             results.append((set(v), [ splitted[c] for c in c_indexes ]))
         return results
 
+    def _filter_single_constraint(self, e_simp): #pylint:disable=no-self-use
+        if not isinstance(e_simp, (Bool, bool)):
+            l.warning("Frontend._constraint_filter got non-boolean from model_backend")
+            raise ClaripyFrontendError()
+
+        if self._eager_resolution('is_false', False, e_simp, use_result=False):
+            raise UnsatError("expressions contain False")
+        elif self._eager_resolution('is_true', False, e_simp, use_result=False):
+            return None
+        else:
+            return e_simp
+
     def _constraint_filter(self, ec):
         fc = [ ]
         for e in ec if type(ec) in (list, tuple, set) else (ec,):
             #e_simp = self._claripy.simplify(e)
-            e_simp = e
-            for b in _eager_backends + [ self._solver_backend ]:
-                try:
-                    o = b.convert(e_simp)
-                    if b._is_false(o):
-                        #filter_false += 1
-                        raise UnsatError("expressions contain False")
-                    elif b._has_true(o):
-                        #filter_true +=1
-                        break
-                    else:
-                        l.warning("Frontend._constraint_filter got non-boolean from model_backend")
-                        raise ClaripyFrontendError()
-                except BackendError:
-                    pass
-            else:
-                fc.append(e_simp)
+            c = self._filter_single_constraint(e)
+            if c is not None:
+                fc.append(c)
 
         return tuple(fc)
-
-    def branch(self):
-        s = self.__class__(self._solver_backend)
-        s.result = self.result
-        s._simplified = self._simplified
-        return s
 
     #
     # Stuff that should be implemented by subclasses
@@ -116,20 +117,26 @@ class Frontend(ana.Storable):
     def _simplify(self):
         raise NotImplementedError("_simplify() is not implemented")
 
-    def _solve(self, extra_constraints=()):
+    def _solve(self, extra_constraints=(), exact=None, cache=None):
         raise NotImplementedError("_solve() is not implemented")
 
-    def _eval(self, e, n, extra_constraints=()):
+    def _eval(self, e, n, extra_constraints=(), exact=None, cache=None):
         raise NotImplementedError("_eval() is not implemented")
 
-    def _min(self, e, extra_constraints=()):
+    def _min(self, e, extra_constraints=(), exact=None, cache=None):
         raise NotImplementedError("_min() is not implemented")
 
-    def _max(self, e, extra_constraints=()):
+    def _max(self, e, extra_constraints=(), exact=None, cache=None):
         raise NotImplementedError("_max() is not implemented")
 
-    def _solution(self, e, v, extra_constraints=()):
+    def _solution(self, e, v, extra_constraints=(), exact=None, cache=None):
         raise NotImplementedError("_solution() is not implemented")
+
+    def _is_true(self, e, extra_constraints=(), exact=None, cache=None):
+        raise NotImplementedError("_is_true() is not implemented")
+
+    def _is_false(self, e, extra_constraints=(), exact=None, cache=None):
+        raise NotImplementedError("_is_false() is not implemented")
 
     def finalize(self):
         raise NotImplementedError("finalize() is not implemented")
@@ -142,6 +149,32 @@ class Frontend(ana.Storable):
 
     def split(self):
         raise NotImplementedError("split() is not implemented")
+
+    #
+    # Caching
+    #
+
+    def _cache_eval(self, e, values, n=None, exact=None, cache=None):
+        if exact is False or cache is False or not self._cache or self.result is None:
+            return
+
+        self.result.eval_cache[e.uuid] = self.result.eval_cache[e.uuid] | values if e.uuid in self.result.eval_cache else values
+        if n is not None:
+            self.result.eval_n[e.uuid] = max(n, self.result.eval_n[e.uuid]) if e.uuid in self.result.eval_n else n
+
+    def _cache_max(self, e, m, exact=None, cache=None):
+        if exact is False or cache is False or not self._cache or self.result is None:
+            return
+
+        self._cache_eval(e, {m}, exact=exact, cache=cache)
+        self.result.max_cache[e.uuid] = min(self.result.max_cache.get(e, (2**e.length)-1), m)
+
+    def _cache_min(self, e, m, exact=None, cache=None):
+        if exact is False or cache is False or not self._cache or self.result is None:
+            return
+
+        self._cache_eval(e, {m}, exact=exact, cache=cache)
+        self.result.min_cache[e.uuid] = max(self.result.min_cache.get(e, 0), m)
 
     #
     # Solving
@@ -161,19 +194,19 @@ class Frontend(ana.Storable):
             to_add = [ false ]
 
         for c in to_add:
-            c.make_uuid()
             if not isinstance(c, Bool):
                 raise ClaripyTypeError('constraint is not a boolean expression!')
+            c.make_uuid()
 
         if self.result is not None and invalidate_cache:
             all_true = True
             for c in to_add:
-                try:
-                    v = LightFrontend._eval.im_func(self, c, 1)[0]
-                    all_true &= v
-                except ClaripyFrontendError:
+                v = self._eager_resolution('eval', [None], c, 1)[0]
+                if v is None:
                     all_true = False
                     break
+                else:
+                    all_true &= v
         else:
             all_true = False
 
@@ -198,7 +231,7 @@ class Frontend(ana.Storable):
         self._simplified = True
         return s
 
-    def solve(self, extra_constraints=()):
+    def solve(self, extra_constraints=(), exact=None, cache=None):
         l.debug("%s.solve() running with %d extra constraints...", self.__class__.__name__, len(extra_constraints))
 
         if self.result is not None:
@@ -215,74 +248,215 @@ class Frontend(ana.Storable):
             return UnsatResult()
 
         l.debug("... conferring with the solver")
-        r = self._solve(extra_constraints=extra_constraints)
-        if len(extra_constraints) == 0 or (self.result is None and r.sat):
+        r = self._solve(extra_constraints=extra_constraints, exact=exact, cache=cache)
+        if exact is not False and cache is not False and (len(extra_constraints) == 0 or (self.result is None and r.sat)):
             l.debug("... caching result (sat: %s)", r.sat)
             self.result = r
         return r
 
-    def satisfiable(self, extra_constraints=()):
-        return self.solve(extra_constraints=extra_constraints).sat
+    def satisfiable(self, extra_constraints=(), exact=None, cache=None):
+        return self.solve(extra_constraints=extra_constraints, exact=exact, cache=cache).sat
 
-    def eval(self, e, n, extra_constraints=()):
+    @staticmethod
+    def _concrete_type_check(e):
+        '''
+        Checks two things:
+
+            1. Whether we can just return this value.
+            2. Whether we can even process this value.
+
+        Returns True if we don't have to pass this to any backends, False if we need
+        to, and raises ClaripyValueError otherwise.
+        '''
+
+        if isinstance(e, (int, long)):
+            return True
+        elif not isinstance(e, Base):
+            raise ClaripyValueError("Expressions passed to min() MUST be Claripy ASTs (got %s)" % type(e))
+        else:
+            return False
+
+    def eval_to_ast(self, e, n, extra_constraints=(), exact=None, cache=None):
+        '''
+        Evaluates expression e, returning the results in the form of concrete ASTs.
+        '''
+
+        return [ BVV(v, e.size()) for v in self.eval(e, n, extra_constraints=extra_constraints, exact=exact, cache=cache) ]
+
+    def _eager_resolution(self, what, default, *args, **kwargs):
+        for b in _eager_backends:
+            try: return getattr(b, what)(*args, result=self.result if kwargs.pop('use_result', True) else None, **kwargs)
+            except BackendError: pass
+        return default
+
+    def eval(self, e, n, extra_constraints=(), exact=None, cache=None):
+        if self._concrete_type_check(e): return [e]
+
+        extra_constraints = self._constraint_filter(extra_constraints)
+        l.debug("Frontend.eval() for UUID %s with n=%d and %d extra_constraints", e.uuid, n, len(extra_constraints))
+
+        # first, try evaluating through the eager backends
+        try:
+            eager_results = frozenset(self._eager_resolution('eval', (), e, n, extra_constraints=extra_constraints))
+            if not e.symbolic and len(eager_results) > 0:
+                return tuple(sorted(eager_results))
+            self._cache_eval(e, eager_results, exact=exact, cache=cache)
+        except UnsatError:
+            # this can happen when the eager backend comes across an unsat extra condition
+            # *while using the current model*. A new constraint solve could return a new,
+            # sat model
+            pass
+
+        # then, check the cache
+        if len(extra_constraints) == 0 and self.result is not None and e.uuid in self.result.eval_cache:
+            cached_results = self.result.eval_cache[e.uuid]
+            cached_n = self.result.eval_n.get(e.uuid, 0)
+        else:
+            cached_results = frozenset()
+            cached_n = 0
+
+        # if there's enough in the cache, return that
+        if cached_n >= n or len(cached_results) < cached_n:
+            return tuple(sorted(cached_results))[:n]
+
+        # try to make sure we don't get more of the same
+        solver_extra_constraints = list(extra_constraints) + [ e != v for v in cached_results ]
+
+        # if we still need more results, get them from the frontend
+        try:
+            n_lacking = n - len(cached_results)
+            eval_results = frozenset(self._eval(e, n_lacking, extra_constraints=solver_extra_constraints, exact=exact, cache=cache))
+            l.debug("... got %d more values", len(eval_results - cached_results))
+        except UnsatError:
+            l.debug("... UNSAT")
+            if len(cached_results) == 0:
+                raise
+            else:
+                eval_results = frozenset()
+        except BackendError:
+            e_type, value, traceback = sys.exc_info()
+            raise ClaripyFrontendError, "Backend error during eval: %s('%s')" % (str(e_type), str(value)), traceback
+
+        # if, for some reason, we have no result object, make an approximate one
+        if self.result is None:
+            self.result = SatResult(approximation=True)
+
+        # if there are less possible solutions than n (i.e., meaning we got all the solutions for e),
+        # add constraints to help the solver out later
+        # TODO: does this really help?
+        all_results = cached_results | eval_results
+        if len(extra_constraints) == 0 and len(all_results) < n:
+            l.debug("... adding constraints for %d values for future speedup", len(all_results))
+            self.add([Or(*[ e == v for v in eval_results | cached_results ])], invalidate_cache=False)
+
+        # fix up the cache. If there were extra constraints, we can't assume that we got
+        # all of the possible solutions, so we have to settle for a biggest-evaluated value
+        # equal to the number of values we got
+        self._cache_eval(e, all_results, n=n if len(extra_constraints) == 0 else None, exact=exact, cache=cache)
+
+        # sort so the order of results is consistent when using pypy
+        return tuple(sorted(all_results))
+
+    def max(self, e, extra_constraints=(), exact=None, cache=None):
+        if self._concrete_type_check(e): return e
         extra_constraints = self._constraint_filter(extra_constraints)
 
-        if not isinstance(e, Base):
-            raise ValueError("Expressions passed to eval() MUST be Claripy ASTs (got %s)" % type(e))
-
-        return self._eval(e, n, extra_constraints=extra_constraints)
-
-    def max(self, e, extra_constraints=()):
-        extra_constraints = self._constraint_filter(extra_constraints)
-
-        if isinstance(e, int):
-            return e
-
-        if not isinstance(e, Base):
-            raise ValueError("Expressions passed to max() MUST be Claripy ASTs (got %s)" % type(e))
+        # first, try evaluating through the eager backends
+        v = self._eager_resolution('max', None, e, extra_constraints=extra_constraints, use_result=False)
+        if v is not None:
+            return v
 
         if len(extra_constraints) == 0 and self.result is not None and e.uuid in self.result.max_cache:
             #cached_max += 1
             return self.result.max_cache[e.uuid]
 
-        m = self._max(e, extra_constraints=extra_constraints)
+        m = self._max(e, extra_constraints=extra_constraints, exact=exact, cache=cache)
         if len(extra_constraints) == 0 and e.symbolic:
-            if self.result is not None: self.result.max_cache[e.uuid] = m
+            self._cache_max(e, m, exact=exact, cache=cache)
             self.add([ULE(e, m)], invalidate_cache=False)
         return m
 
-    def min(self, e, extra_constraints=()):
+    def min(self, e, extra_constraints=(), exact=None, cache=None):
+        if self._concrete_type_check(e): return e
         extra_constraints = self._constraint_filter(extra_constraints)
 
-        if isinstance(e, int):
-            return e
-
-        if not isinstance(e, Base):
-            raise ValueError("Expressions passed to min() MUST be Claripy ASTs (got %s)" % type(e))
+        # first, try evaluating through the eager backends
+        v = self._eager_resolution('min', None, e, extra_constraints=extra_constraints, use_result=False)
+        if v is not None:
+            return v
 
         if len(extra_constraints) == 0 and self.result is not None and e.uuid in self.result.min_cache:
             #cached_min += 1
             return self.result.min_cache[e.uuid]
 
-        m = self._min(e, extra_constraints=extra_constraints)
+        m = self._min(e, extra_constraints=extra_constraints, exact=exact, cache=cache)
         if len(extra_constraints) == 0 and e.symbolic:
-            if self.result is not None: self.result.min_cache[e.uuid] = m
+            self._cache_min(e, m, exact=exact, cache=cache)
             self.add([UGE(e, m)], invalidate_cache=False)
         return m
 
-    def solution(self, e, v, extra_constraints=()):
+    def solution(self, e, v, extra_constraints=(), exact=None, cache=None):
         try:
             extra_constraints = self._constraint_filter(extra_constraints)
         except UnsatError:
             return False
 
-        if not isinstance(e, Base):
-            raise ValueError("Expressions passed to solution() MUST be Claripy ASTs (got %s)" % type(e))
+        if self._concrete_type_check(e) and self._concrete_type_check(v):
+            return e == v
+        eager_solution = self._eager_resolution('solution', None, e, v)
+        if eager_solution is not None:
+            return eager_solution
 
-        b = self._solution(e, v, extra_constraints=extra_constraints)
-        if b is False and len(extra_constraints) > 0 and e.symbolic:
+        b = self._solution(e, v, extra_constraints=extra_constraints, exact=exact, cache=cache)
+        if b is False and len(extra_constraints) == 0 and e.symbolic:
             self.add([e != v], invalidate_cache=False)
+
+        # add these results to the cache
+        if self.result is not None and b is True:
+            if isinstance(e, Base) and e.symbolic and not isinstance(v, Base):
+                self._cache_eval(e, frozenset({v}), exact=exact, cache=cache)
+            if isinstance(v, Base) and v.symbolic and not isinstance(e, Base):
+                self._cache_eval(v, frozenset({e}), exact=exact, cache=cache)
+
         return b
+
+    def is_true(self, e, extra_constraints=(), exact=None, cache=None):
+        if self._concrete_type_check(e):
+            return e is True
+
+        if not isinstance(e, Bool):
+            raise ClaripyValueError("got a non-Boolean expression in Frontend.is_true()")
+
+        eager_solution = self._eager_resolution('is_true', None, e)
+        if eager_solution is True:
+            return eager_solution
+
+        try:
+            b = self._is_true(e, extra_constraints=extra_constraints, exact=exact, cache=cache)
+            if b is True and len(extra_constraints) == 0 and e.symbolic:
+                self.add([e == True], invalidate_cache=False)
+            return b
+        except ClaripyFrontendError:
+            return False
+
+    def is_false(self, e, extra_constraints=(), exact=None, cache=None):
+        if self._concrete_type_check(e):
+            return e is False
+
+        if not isinstance(e, Bool):
+            raise ClaripyValueError("got a non-Boolean expression in Frontend.is_false()")
+
+        eager_solution = self._eager_resolution('is_false', None, e)
+        if eager_solution is True:
+            return eager_solution
+
+        try:
+            b = self._is_false(e, extra_constraints=extra_constraints, exact=exact, cache=cache)
+            if b is True and len(extra_constraints) == 0 and e.symbolic:
+                self.add([e == False], invalidate_cache=False)
+            return b
+        except ClaripyFrontendError:
+            return False
 
     #
     # Serialization and such.
@@ -292,10 +466,9 @@ class Frontend(ana.Storable):
         if self.result is not None:
             self.result.downsize()
 
-from .frontends import LightFrontend
 from .result import UnsatResult, SatResult
-from .errors import UnsatError, BackendError, ClaripyFrontendError, ClaripyTypeError
-from . import _eager_backends, _backends
+from .errors import UnsatError, BackendError, ClaripyFrontendError, ClaripyTypeError, ClaripyValueError
+from . import _eager_backends
 from .ast.base import Base
-from .ast.bool import false, Bool
-from .ast.bv import UGE, ULE
+from .ast.bool import false, Bool, Or
+from .ast.bv import UGE, ULE, BVV
