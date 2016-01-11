@@ -2,9 +2,9 @@ import claripy
 import nose
 
 def test_simple_merging():
-    yield raw_simple_merging, lambda: claripy.FullFrontend(claripy.backend_z3)
-    yield raw_simple_merging, lambda: claripy.HybridFrontend(claripy.backend_z3)
-    yield raw_simple_merging, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backend_z3))
+    yield raw_simple_merging, lambda: claripy.FullFrontend(claripy.backends.z3)
+    yield raw_simple_merging, lambda: claripy.HybridFrontend(claripy.backends.z3)
+    yield raw_simple_merging, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
 
 def raw_simple_merging(solver_type):
     s1 = solver_type()
@@ -108,4 +108,5 @@ def raw_simple_merging(solver_type):
     nose.tools.assert_false(smm_1.satisfiable())
 
 if __name__ == '__main__':
-    test_simple_merging()
+    for func, param in test_simple_merging():
+        func(param)

@@ -5,12 +5,12 @@ import logging
 l = logging.getLogger('claripy.test.solver')
 
 def test_solver():
-    yield raw_solver, lambda: claripy.FullFrontend(claripy.backend_z3)
-    yield raw_solver, lambda: claripy.HybridFrontend(claripy.backend_z3)
-    yield raw_solver, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backend_z3))
+    yield raw_solver, lambda: claripy.FullFrontend(claripy.backends.z3)
+    yield raw_solver, lambda: claripy.HybridFrontend(claripy.backends.z3)
+    yield raw_solver, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
 
 def test_hybrid_solver():
-    s = claripy.HybridFrontend(claripy.backend_z3)
+    s = claripy.HybridFrontend(claripy.backends.z3)
 
     x = claripy.BVS('x', 32, min=0, max=10, stride=2)
     y = claripy.BVS('y', 32, min=20, max=30, stride=5)
@@ -38,7 +38,7 @@ def test_hybrid_solver():
     nose.tools.assert_equal(s.eval(y, 20), (30,))
 
 def test_replacement_solver():
-    sr = claripy.ReplacementFrontend(claripy.HybridFrontend(claripy.backend_z3))
+    sr = claripy.ReplacementFrontend(claripy.HybridFrontend(claripy.backends.z3))
     x = claripy.BVS('x', 32)
     nose.tools.assert_equals(len(sr.eval(x, 10)), 10)
     sr.result = None
@@ -81,6 +81,12 @@ def raw_solver(solver_type):
     nose.tools.assert_true(s.solution(y, 15))
     nose.tools.assert_false(s.solution(y, 13))
 
+    # Batch evaluation
+    results = s.batch_eval([x + 5, x + 6, 3], 2)
+    nose.tools.assert_equal(len(results), 1)
+    nose.tools.assert_equal(results[0][0], 15) # x + 5
+    nose.tools.assert_equal(results[0][1], 16) # x + 6
+    nose.tools.assert_equal(results[0][2], 3)  # constant
 
     shards = s.split()
     nose.tools.assert_equal(len(shards), 2)
@@ -149,6 +155,19 @@ def raw_solver(solver_type):
         print "TODO: figure out why this is different now"
         nose.tools.assert_equal({ len(_.constraints) for _ in ss }, { 2, 2 }) # constraints from min or max
 
+    # Batch evaluation
+    s.add(y < 24)
+    s.add(z < x) # Just to make sure x, y, and z belong to the same solver, since batch evaluation does not support the
+                 # situation where expressions belong to more than one solver
+    results = s.batch_eval([x, y, z], 20)
+    nose.tools.assert_set_equal(
+        set(results),
+        {(21L, 23L, 1L), (22L, 23L, 3L), (22L, 23L, 2L), (22L, 23L, 4L), (21L, 22L, 4L), (21L, 23L, 4L), (22L, 23L, 0L),
+         (22L, 23L, 1L), (21L, 22L, 1L), (21L, 22L, 3L), (21L, 22L, 2L), (21L, 22L, 0L), (21L, 23L, 0L), (21L, 23L, 2L),
+         (21L, 23L, 3L)
+        }
+    )
+
     # test that False makes it unsat
     s = solver_type()
     s.add(claripy.BVV(1,1) == claripy.BVV(1,1))
@@ -188,9 +207,9 @@ def raw_solver(solver_type):
     nose.tools.assert_true(s.result is not None)
 
 def test_solver_branching():
-    yield raw_solver_branching, lambda: claripy.FullFrontend(claripy.backend_z3)
-    yield raw_solver_branching, lambda: claripy.HybridFrontend(claripy.backend_z3)
-    yield raw_solver_branching, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backend_z3))
+    yield raw_solver_branching, lambda: claripy.FullFrontend(claripy.backends.z3)
+    yield raw_solver_branching, lambda: claripy.HybridFrontend(claripy.backends.z3)
+    yield raw_solver_branching, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
 
 def raw_solver_branching(solver_type):
     s = solver_type()
@@ -222,9 +241,9 @@ def raw_solver_branching(solver_type):
     nose.tools.assert_false(t.satisfiable())
 
 def test_combine():
-    yield raw_combine, lambda: claripy.FullFrontend(claripy.backend_z3)
-    yield raw_combine, lambda: claripy.HybridFrontend(claripy.backend_z3)
-    yield raw_combine, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backend_z3))
+    yield raw_combine, lambda: claripy.FullFrontend(claripy.backends.z3)
+    yield raw_combine, lambda: claripy.HybridFrontend(claripy.backends.z3)
+    yield raw_combine, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
 
 def raw_combine(solver_type):
     s10 = solver_type()
@@ -247,7 +266,7 @@ def raw_combine(solver_type):
     nose.tools.assert_equal(len(s30.combine([s10]).constraints), 2)
 
 def test_composite_solver():
-    s = claripy.CompositeFrontend(claripy.FullFrontend(claripy.backend_z3))
+    s = claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
     x = claripy.BVS("x", 32)
     y = claripy.BVS("y", 32)
     z = claripy.BVS("z", 32)
@@ -276,7 +295,7 @@ def test_composite_solver():
     nose.tools.assert_false(s.satisfiable())
 
 def test_minmax():
-    s = claripy.FullFrontend(claripy.backend_z3)
+    s = claripy.FullFrontend(claripy.backends.z3)
     x = claripy.BVS("x", 32)
 
     nose.tools.assert_equal(s.max(x), 2**32-1)
@@ -287,7 +306,11 @@ if __name__ == '__main__':
     test_replacement_solver()
     test_hybrid_solver()
     test_minmax()
-    test_solver()
+    for func, param in test_solver():
+        func(param)
     test_solver_branching()
-    test_combine()
+    for func, param in test_solver_branching():
+        func(param)
+    for func, param in test_combine():
+        func(param)
     test_composite_solver()

@@ -11,12 +11,17 @@ class BackendConcrete(Backend):
         self._op_raw['If'] = self._If
         self._op_expr['BVS'] = self.BVS
         self._op_raw['BVV'] = self.BVV
+        self._op_raw['FPV'] = self.FPV
 
     @staticmethod
     def BVV(value, size):
         if value is None:
             raise BackendError("can't handle empty BVVs")
         return bv.BVV(value, size)
+
+    @staticmethod
+    def FPV(op, sort):
+        return fp.FPV(op, sort)
 
     @staticmethod
     def BVS(ast, result=None):
@@ -101,6 +106,12 @@ class BackendConcrete(Backend):
             raise UnsatError('concrete False constraint in extra_constraints')
 
         return (self._to_primitive(expr),)
+
+    def _batch_eval(self, exprs, n, result=None, extra_constraints=(), solver=None):
+        if not all(extra_constraints):
+            raise UnsatError('concrete False constraint in extra_constraints')
+
+        return [ tuple([self._to_primitive(ex) for ex in exprs]) ]
 
     def _max(self, expr, result=None, solver=None, extra_constraints=()):
         if not all(extra_constraints):

@@ -1,7 +1,7 @@
 #import time
 
 from ..backend import Backend
-from .backend_z3 import BackendZ3
+from .backends.z3 import BackendZ3
 try:
     from . import remotetasks
 except ImportError:
@@ -62,6 +62,13 @@ class BackendRemote(Backend):
                 x.make_uuid()
         # print pickle.dumps(s.plus_extra(extra_constraints))
         res = remotetasks.eval.delay(solver.plus_extra(extra_constraints), expr, n)
+        return get(res)
+
+    def _batch_eval(self, exprs, n, result=None, extra_constraints=(), solver=None):
+        for x in solver.plus_extra(extra_constraints):
+            if hasattr(x, 'make_uuid'):
+                x.make_uuid()
+        res = remotetasks.batch_eval.delay(solver.plus_extra(extra_constraints), exprs, n)
         return get(res)
 
     def _results(self, s, extra_constraints=(), generic_model=True):

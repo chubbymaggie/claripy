@@ -25,7 +25,7 @@ class FullFrontend(ConstrainedFrontend):
 
     def _ana_setstate(self, s):
         backend_name, self.timeout, base_state = s
-        self._solver_backend = _backends[backend_name]
+        self._solver_backend = backends._backends_by_type[backend_name]
         self._tls = None
         self._to_add = [ ]
         ConstrainedFrontend._ana_setstate(self, base_state)
@@ -89,6 +89,18 @@ class FullFrontend(ConstrainedFrontend):
             raise UnsatError('unsat')
 
         return self._solver_backend.eval(e, n, extra_constraints=extra_constraints, result=self.result, solver=self._get_solver())
+
+    def _batch_eval(self, exprs, n, extra_constraints=(), exact=None, cache=None):
+        if not self.satisfiable(extra_constraints=extra_constraints):
+            raise UnsatError('unsat')
+
+        return self._solver_backend.batch_eval(
+                exprs,
+                n,
+                extra_constraints=extra_constraints,
+                result=self.result,
+                solver=self._get_solver()
+        )
 
     def _max(self, e, extra_constraints=(), exact=None, cache=None):
         if not self.satisfiable(extra_constraints=extra_constraints):
@@ -196,4 +208,4 @@ class FullFrontend(ConstrainedFrontend):
 
 from ..errors import UnsatError, BackendError, ClaripyFrontendError
 from ..ast.bv import UGE, ULE
-from .. import _backends
+from ..backend_manager import backends

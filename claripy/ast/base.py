@@ -114,7 +114,7 @@ class Base(ana.Storable):
         if 'add_variables' in kwargs:
             kwargs['variables'] = kwargs['variables'] | kwargs['add_variables']
 
-        eager_backends = list(_eager_backends) if 'eager_backends' not in kwargs else kwargs['eager_backends']
+        eager_backends = list(backends._eager_backends) if 'eager_backends' not in kwargs else kwargs['eager_backends']
 
         if not kwargs['symbolic'] and eager_backends is not None and op not in operations.leaf_operations:
             for eb in eager_backends:
@@ -699,36 +699,11 @@ class Base(ana.Storable):
         return self._excavated
 
     #
-    # Alright, I give up. Here are some convenience accessors to backend models.
-    #
-
-    @property
-    def _model_vsa(self):
-        try:
-            return _backends['BackendVSA'].convert(self)
-        except BackendError:
-            return self
-
-    @property
-    def _model_z3(self):
-        try:
-            return _backends['BackendZ3'].convert(self)
-        except BackendError:
-            return self
-
-    @property
-    def _model_concrete(self):
-        try:
-            return _backends['BackendConcrete'].convert(self)
-        except BackendError:
-            return self
-
-    #
     # these are convenience operations
     #
 
     def _first_backend(self, what):
-        for b in _all_backends:
+        for b in backends._all_backends:
             if b in self._errored:
                 continue
 
@@ -749,7 +724,7 @@ class Base(ana.Storable):
 
     @property
     def concrete(self):
-        return _backends['BackendConcrete'].handles(self)
+        return backends.concrete.handles(self)
 
     @property
     def uninitialized(self):
@@ -788,6 +763,18 @@ class Base(ana.Storable):
                self._model_z3 if self._model_z3 is not self else \
                self
 
+    def __getattr__(self, a):
+        if not a.startswith('_model_'):
+            raise AttributeError(a)
+
+        model_name = a[7:]
+        if not hasattr(backends, model_name):
+            raise AttributeError(a)
+
+        try:
+            return getattr(backends, model_name).convert(self)
+        except BackendError:
+            return self
 
 def simplify(e):
     if isinstance(e, Base) and e.op == 'I':
@@ -809,6 +796,6 @@ def simplify(e):
 from ..errors import BackendError, ClaripyOperationError, ClaripyRecursionError
 from .. import operations
 from ..backend_object import BackendObject
-from .. import _all_backends, _eager_backends, _backends
+from ..backend_manager import backends
 from ..ast.bool import If, Not
 from ..ast.bv import BV
