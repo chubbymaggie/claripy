@@ -277,10 +277,41 @@ def test_bool():
     o = claripy.Or(*[False, False, False])
     nose.tools.assert_equal(bc.convert(o), False)
 
+def test_extract_concat_simplify():
+    a = claripy.BVS("a", 32)
+    assert a[31:0] is a
+    assert a[31:8].concat(a[7:0]) is a
+    assert a[31:16].concat(a[15:8], a[7:0]) is a
+    assert a[31:24].concat(a[23:16], a[15:8], a[7:0]) is a
+
+    a = claripy.BVS("a", 32)
+    b = a + 100
+    b_concat = b[31:8].concat(b[7:0])
+    a100 = a + 100
+    assert claripy.is_false(b_concat == a100) is False
+    assert list(claripy.Solver().eval(b_concat == a100, 2)) == [ True ]
+    assert b_concat is a100
+    assert claripy.is_true(b_concat == a100)
+
+def test_true_false_cache():
+    claripy.backends._quick_backends.append(claripy.backends.z3)
+
+    a = claripy.BVS("a_WILL_BE_VIOLATED", 32)
+    c = a == a+1
+    assert claripy.is_false(c)
+    c.args[1].args = (a, claripy.BVV(0, 32))
+    assert claripy.is_false(c)
+    assert not claripy.is_true(c)
+    assert not claripy.is_false(a == a)
+
+    claripy.backends._quick_backends[-1:] = [ ]
+
 if __name__ == '__main__':
+    test_true_false_cache()
     test_smudging()
     test_expression()
     test_bool()
+    test_extract_concat_simplify()
     for func, param in test_ite():
         func(param)
     test_if_stuff()
