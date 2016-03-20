@@ -34,9 +34,12 @@ _z3_paths.extend(sys.path)
 _z3_paths.append("/usr/lib")
 _z3_paths.append("/usr/local/lib")
 _z3_paths.append("/opt/python/lib")
+_z3_paths.append(os.path.join(sys.prefix, "lib"))
 
 for z3_path in _z3_paths:
-    if not '.so' in z3_path and not '.dll' in z3_path:
+    if not '.so' in z3_path and \
+            not '.dll' in z3_path and \
+            not '.dylib' in z3_path:
         z3_path = os.path.join(z3_path, z3_library_file)
     if os.path.exists(z3_path):
         z3.init(z3_path)
@@ -52,9 +55,9 @@ from ..backend import Backend
 
 def condom(f):
     def z3_condom(*args, **kwargs):
-        '''
-        The Z3 condom intersects Z3Exceptions and throws a ClaripyZ3Error instead.
-        '''
+        """
+        The Z3 condom intercepts Z3Exceptions and throws a ClaripyZ3Error instead.
+        """
         try:
             condom_args = tuple((int(a) if type(a) is long and a < sys.maxint else a) for a in args)
             return f(*condom_args, **kwargs)
@@ -269,9 +272,9 @@ class BackendZ3(Backend):
         """
         This is a better hashing function for z3 Ast objects. Z3_get_ast_hash() creates too many hash collisions.
 
-        :param ctx: z3 Context
-        :param ast: z3 Ast object
-        :return: An integer - the hash
+        :param ctx: A z3 Context.
+        :param ast: A z3 Ast object.
+        :return:    An integer - the hash.
         """
 
         z3_hash = z3.Z3_get_ast_hash(ctx, ast)

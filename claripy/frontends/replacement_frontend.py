@@ -2,12 +2,17 @@
 
 import weakref
 import logging
+
 l = logging.getLogger("claripy.frontends.full_frontend")
 
 from .constrained_frontend import ConstrainedFrontend
 
+
 class ReplacementFrontend(ConstrainedFrontend):
-    def __init__(self, actual_frontend, allow_symbolic=None, replacements=None, replacement_cache=None, unsafe_replacement=None, complex_auto_replace=None, auto_replace=None, replace_constraints=None, balancer=None, **kwargs):
+    def __init__(self, actual_frontend, allow_symbolic=None, replacements=None, replacement_cache=None,
+                 unsafe_replacement=None, complex_auto_replace=None, auto_replace=None, replace_constraints=None,
+                 balancer=None, **kwargs):
+
         kwargs['cache'] = kwargs.get('cache', False)
         ConstrainedFrontend.__init__(self, **kwargs)
         self._actual_frontend = actual_frontend
@@ -16,12 +21,14 @@ class ReplacementFrontend(ConstrainedFrontend):
         self._complex_auto_replace = False if complex_auto_replace is None else complex_auto_replace
         self._replace_constraints = False if replace_constraints is None else replace_constraints
         self._unsafe_replacement = False if unsafe_replacement is None else unsafe_replacement
-        self._replacements = { } if replacements is None else replacements
+        self._replacements = {} if replacements is None else replacements
         self._replacement_cache = weakref.WeakKeyDictionary() if replacement_cache is None else replacement_cache
-        self._balancer = Balancer(self._actual_frontend._solver_backend) if balancer is None else balancer
 
     def add_replacement(self, old, new, invalidate_cache=True, replace=True, promote=True):
         if not isinstance(old, Base):
+            return
+
+        if old is new:
             return
 
         if not replace and old.cache_key in self._replacements:
@@ -40,7 +47,7 @@ class ReplacementFrontend(ConstrainedFrontend):
 
         if invalidate_cache:
             self._replacements = dict(self._replacements)
-            self._replacement_cache = weakref.WeakKeyDictionary(self._replacement_cache)
+            self._replacement_cache = weakref.WeakKeyDictionary(self._replacements)
 
         self._replacements[old.cache_key] = new
         self._replacement_cache[old.cache_key] = new
@@ -66,14 +73,14 @@ class ReplacementFrontend(ConstrainedFrontend):
             return
         self.add_replacement(e, r, invalidate_cache=False)
 
-
     #
     # Storable support
     #
 
     def _blank_copy(self):
-        s = ReplacementFrontend(self._actual_frontend._blank_copy(), balancer=self._balancer)
+        s = ReplacementFrontend(self._actual_frontend._blank_copy())
         s._auto_replace = self._auto_replace
+        s._complex_auto_replace = self._complex_auto_replace
         s._replace_constraints = self._replace_constraints
         s._unsafe_replacement = self._unsafe_replacement
         s._allow_symbolic = self._allow_symbolic
@@ -175,52 +182,69 @@ class ReplacementFrontend(ConstrainedFrontend):
                 # the badass thing here would be to use the *replaced* constraint, but
                 # we don't currently support chains of replacements, so we'll do a
                 # less effective flat-replacement with the original constraint
-                #rc = self._replacement(c)
+                # rc = self._replacement(c)
                 rc = c
                 if not isinstance(rc, Base) or not rc.symbolic:
                     continue
 
-                if rc.op == 'Not':
-                    self.add_replacement(c.args[0], false, replace=False, promote=True, invalidate_cache=True)
-                elif rc.op == '__eq__' and rc.args[0].symbolic ^ rc.args[1].symbolic:
-                    old, new = rc.args if rc.args[0].symbolic else rc.args[::-1]
-                    self.add_replacement(old, new, promote=True, invalidate_cache=True)
-                elif self._complex_auto_replace:
-                    satisfiable, replacements = self._balancer.constraint_to_si(rc)
+                if not self._complex_auto_replace:
+                    if rc.op == 'Not':
+                        self.add_replacement(c.args[0], false, replace=False, promote=True, invalidate_cache=True)
+                    elif rc.op == '__eq__' and rc.args[0].symbolic ^ rc.args[1].symbolic:
+                        old, new = rc.args if rc.args[0].symbolic else rc.args[::-1]
+                        self.add_replacement(old, new, promote=True, invalidate_cache=True)
+                else:
+                    satisfiable, replacements = Balancer(backends.vsa, rc).compat_ret
                     if not satisfiable:
                         self.add_replacement(rc, false)
                     for old, new in replacements:
+                        if old.cardinality == 1:
+                            continue
+
                         rold = self._replacement(old)
+                        if rold.cardinality == 1:
+                            continue
+
                         self.add_replacement(old, rold.intersection(new))
 
         ConstrainedFrontend._add_constraints(self, constraints, **kwargs)
 
         cr = self._replace_list(constraints)
         if not self._allow_symbolic and any(c.symbolic for c in cr):
-            raise ClaripyFrontendError("symbolic constraints made it into ReplacementFrontend with allow_symbolic=False")
+            raise ClaripyFrontendError(
+                "symbolic constraints made it into ReplacementFrontend with allow_symbolic=False")
         return self._actual_frontend.add(cr, **kwargs)
 
-    #def _add_constraints(self, *args, **kwargs): #pylint:disable=unused-argument
+    # def _add_constraints(self, *args, **kwargs): #pylint:disable=unused-argument
     #   raise Exception("this should not be called")
-    def _solve(self, *args, **kwargs): #pylint:disable=unused-argument
+    def _solve(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _eval(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _eval(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _batch_eval(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _batch_eval(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _max(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _max(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _min(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _min(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _solution(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _solution(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _is_true(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _is_true(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
-    def _is_false(self, *args, **kwargs): #pylint:disable=unused-argument
+
+    def _is_false(self, *args, **kwargs):  # pylint:disable=unused-argument
         raise Exception("this should not be called")
+
 
 from ..ast.base import Base
 from ..ast.bv import BVV
 from ..ast.bool import BoolV, false
 from ..errors import ClaripyFrontendError
 from ..balancer import Balancer
+from ..backend_manager import backends

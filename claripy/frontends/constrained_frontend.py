@@ -1,14 +1,16 @@
 #!/usr/bin/env python
 
 import logging
+
 l = logging.getLogger("claripy.frontends.constrained_frontend")
 
-from ..frontend import Frontend
+from .caching_frontend import CachingFrontend
 
-class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
+
+class ConstrainedFrontend(CachingFrontend):  # pylint:disable=abstract-method
     def __init__(self, **kwargs):
-        Frontend.__init__(self, **kwargs)
-        self.constraints = [ ]
+        CachingFrontend.__init__(self, **kwargs)
+        self.constraints = []
         self._constraint_hashes = set()
         self.variables = set()
         self._finalized = False
@@ -20,11 +22,11 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
     def _ana_getstate(self):
         if not self._simplified: self.simplify()
         self.finalize()
-        return self.constraints, self.variables, Frontend._ana_getstate(self)
+        return self.constraints, self.variables, CachingFrontend._ana_getstate(self)
 
     def _ana_setstate(self, s):
         self.constraints, self.variables, base_state = s
-        Frontend._ana_setstate(self, base_state)
+        CachingFrontend._ana_setstate(self, base_state)
         self._finalized = True
 
     #
@@ -39,19 +41,18 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
     #
 
     def _add_constraints(self, constraints, invalidate_cache=True):
-        new_constraints = [ c for c in constraints if hash(c) not in self._constraint_hashes ]
+        new_constraints = [c for c in constraints if hash(c) not in self._constraint_hashes]
         self.constraints += new_constraints
         for c in new_constraints:
             self.variables.update(c.variables)
             self._constraint_hashes.add(hash(c))
         return new_constraints
 
-
     def _simplify(self):
         if len(self.constraints) == 0:
             return
 
-        self.constraints = [ simplify(And(*self.constraints)) ]
+        self.constraints = [simplify(And(*self.constraints))]
 
         # we only add to the constraint hashes because we want to
         # prevent previous (now simplified) constraints from
@@ -76,7 +77,7 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
     #
 
     def downsize(self):
-        Frontend.downsize(self)
+        CachingFrontend.downsize(self)
 
     #
     # Merging and splitting
@@ -89,7 +90,7 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
         return ConstrainedFrontend(cache=self._cache)
 
     def branch(self):
-        s = Frontend.branch(self)
+        s = CachingFrontend.branch(self)
         s.constraints = list(self.constraints)
         s.variables = set(self.variables)
         s._constraint_hashes = set(self._constraint_hashes)
@@ -100,10 +101,10 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
     def merge(self, others, merge_flag, merge_values):
         merged = self._blank_copy()
         merged._simplified = False
-        options = [ ]
+        options = []
 
-        for s, v in zip([self]+others, merge_values):
-            options.append(And(*([ merge_flag == v ] + s.constraints)))
+        for s, v in zip([self] + others, merge_values):
+            options.append(And(*([merge_flag == v] + s.constraints)))
         merged.add([Or(*options)])
 
         return False, merged
@@ -112,15 +113,15 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
         combined = self._blank_copy()
         combined._simplified = False
 
-        combined.add(self.constraints) #pylint:disable=E1101
+        combined.add(self.constraints)  # pylint:disable=E1101
         for o in others:
             combined.add(o.constraints)
         return combined
 
     def split(self):
-        results = [ ]
+        results = []
         l.debug("Splitting!")
-        for variables,c_list in self.independent_constraints():
+        for variables, c_list in self.independent_constraints():
             l.debug("... got %d constraints with %d variables", len(c_list), len(variables))
 
             s = self._blank_copy()
@@ -128,6 +129,7 @@ class ConstrainedFrontend(Frontend): #pylint:disable=abstract-method
             s.add(c_list)
             results.append(s)
         return results
+
 
 from ..result import SatResult
 from ..ast.base import Base, simplify

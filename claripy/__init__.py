@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 # pylint: disable=F0401,W0401,W0603,
 
 import os
@@ -37,7 +36,7 @@ sys.setrecursionlimit(_recurse)
 #
 
 from .frontend import Frontend as _Frontend
-from .frontends import LightFrontend, FullFrontend, CompositeFrontend, HybridFrontend, ReplacementFrontend
+from .frontends import LightFrontend, FullFrontend, CompositeFrontend, HybridFrontend, ReplacementFrontend, hybrid_vsa_z3
 from .result import Result
 
 #
@@ -92,4 +91,4 @@ def downsize():
     backends.downsize()
 
 def Solver():
-    return HybridFrontend(backends.z3)
+    return hybrid_vsa_z3()

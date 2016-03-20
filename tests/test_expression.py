@@ -223,7 +223,7 @@ def test_if_stuff():
 
 def test_ite():
     yield raw_ite, lambda: claripy.FullFrontend(claripy.backends.z3)
-    yield raw_ite, lambda: claripy.HybridFrontend(claripy.backends.z3)
+    yield raw_ite, claripy.hybrid_vsa_z3
     yield raw_ite, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
 
 def raw_ite(solver_type):
@@ -277,6 +277,16 @@ def test_bool():
     o = claripy.Or(*[False, False, False])
     nose.tools.assert_equal(bc.convert(o), False)
 
+def test_extract():
+    a = claripy.BVS("a", 32)
+    assert a[7:] is a[7:0]
+    assert a[31:] is a
+    assert a[:] is a
+    assert a[:0] is a
+    assert a[:-8] is a[31:24]
+    assert a[-1:] is a[31:0]
+    assert a[-1:-8] is a[31:24]
+
 def test_extract_concat_simplify():
     a = claripy.BVS("a", 32)
     assert a[31:0] is a
@@ -306,7 +316,21 @@ def test_true_false_cache():
 
     claripy.backends._quick_backends[-1:] = [ ]
 
+def test_depth_repr():
+    x = claripy.BVS("x", 32)
+    y = claripy.LShR(x, 10)
+    y = claripy.LShR(y, 10)
+    y = claripy.LShR(y, 10)
+    y = claripy.LShR(y, 10)
+    y = claripy.LShR(y, 10)
+    y = claripy.LShR(y, 10)
+    y = claripy.LShR(y, 10)
+    print(y.shallow_repr(max_depth=5))
+    nose.tools.assert_equal(y.shallow_repr(max_depth=5), "<BV32 LShR(LShR(LShR(LShR(<...>, <...>), <...>), <...>), <...>)>")
+
 if __name__ == '__main__':
+    test_depth_repr()
+    test_extract()
     test_true_false_cache()
     test_smudging()
     test_expression()
