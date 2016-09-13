@@ -60,6 +60,24 @@ class BV(Bits):
         else:
             return Extract(int(rng), int(rng), self)
 
+    def get_byte(self, index):
+        """
+        Extracts a byte from a BV, where the index refers to the byte in a big-endian order
+        :param index: the byte to extract
+        :return:
+        """
+        pos = self.size() / 8 - 1 - index
+        return self[pos * 8 + 7 : pos * 8]
+
+    def get_bytes(self, index, size):
+        """
+        Extracts several byte from a BV, where the index refers to the byte in a big-endian order
+        :param index: the byte to extract
+        :return:
+        """
+        pos = self.size() / 8 - 1 - index
+        return self[pos * 8 + 7 : (pos - size + 1) * 8]
+
     def zero_extend(self, n):
         """
         Zero-extends the AST by n bits. So:
@@ -95,6 +113,10 @@ class BV(Bits):
         return BVV(value, like.length)
 
     @staticmethod
+    def _from_str(like, value): #pylint:disable=unused-argument
+        return BVV(value)
+
+    @staticmethod
     def _from_BVV(like, value): #pylint:disable=unused-argument
         return BVV(value.value, value.size())
 
@@ -116,7 +138,8 @@ class BV(Bits):
     def to_bv(self):
         return self
 
-def BVS(name, size, min=None, max=None, stride=None, uninitialized=False, explicit_name=None, **kwargs): #pylint:disable=redefined-builtin
+def BVS(name, size, min=None, max=None, stride=None, uninitialized=False,  #pylint:disable=redefined-builtin
+        explicit_name=None, discrete_set=False, discrete_set_max_card=None, **kwargs):
     """
     Creates a bit-vector symbol (i.e., a variable).
 
@@ -127,7 +150,10 @@ def BVS(name, size, min=None, max=None, stride=None, uninitialized=False, explic
     :param stride:          The stride of the symbol.
     :param uninitialized:   Whether this value should be counted as an "uninitialized" value in the course of an
                             analysis.
-    :param explicit_name:   If False, an identifier is appended to the name to ensure uniqueness.
+    :param bool explicit_name:   If False, an identifier is appended to the name to ensure uniqueness.
+    :param bool discrete_set: If True, a DiscreteStridedIntervalSet will be used instead of a normal StridedInterval.
+    :param int discrete_set_max_card: The maximum cardinality of the discrete set. It is ignored if discrete_set is set
+                                      to False or None.
 
     :returns:               a BV object representing this symbol.
     """
@@ -136,7 +162,12 @@ def BVS(name, size, min=None, max=None, stride=None, uninitialized=False, explic
         raise ClaripyValueError("BVSes of stride 0 should have max == min")
 
     n = _make_name(name, size, False if explicit_name is None else explicit_name)
-    return BV('BVS', (n, min, max, stride, uninitialized), variables={n}, length=size, symbolic=True, eager_backends=None, uninitialized=uninitialized, **kwargs)
+
+    if not discrete_set:
+        discrete_set_max_card = None
+
+    return BV('BVS', (n, min, max, stride, uninitialized, discrete_set, discrete_set_max_card), variables={n},
+              length=size, symbolic=True, eager_backends=None, uninitialized=uninitialized, **kwargs)
 
 def BVV(value, size=None, **kwargs):
     """
@@ -151,9 +182,9 @@ def BVV(value, size=None, **kwargs):
     if type(value) is str:
         if size is None:
             size = 8*len(value)
-            value = int(value.encode('hex'), 16)
+            value = int(value.encode('hex'), 16) if value != "" else 0
         elif size == len(value)*8:
-            value = int(value.encode('hex'), 16)
+            value = int(value.encode('hex'), 16) if value != "" else 0
         else:
             raise ClaripyValueError('string/size mismatch for BVV creation')
     elif size is None:
@@ -167,12 +198,14 @@ def BVV(value, size=None, **kwargs):
     _bvv_cache[(value, size)] = result
     return result
 
-def SI(name=None, bits=0, lower_bound=None, upper_bound=None, stride=None, to_conv=None, explicit_name=None):
+def SI(name=None, bits=0, lower_bound=None, upper_bound=None, stride=None, to_conv=None, explicit_name=None,
+       discrete_set=False, discrete_set_max_card=None):
     name = 'unnamed' if name is None else name
     if to_conv is not None:
         si = vsa.CreateStridedInterval(name=name, bits=bits, lower_bound=lower_bound, upper_bound=upper_bound, stride=stride, to_conv=to_conv)
         return BVS(name, si._bits, min=si._lower_bound, max=si._upper_bound, stride=si._stride, explicit_name=explicit_name)
-    return BVS(name, bits, min=lower_bound, max=upper_bound, stride=stride, explicit_name=explicit_name)
+    return BVS(name, bits, min=lower_bound, max=upper_bound, stride=stride, explicit_name=explicit_name,
+               discrete_set=discrete_set, discrete_set_max_card=discrete_set_max_card)
 
 def TSI(bits, name=None, uninitialized=False, explicit_name=None):
     name = 'unnamed' if name is None else name
@@ -181,10 +214,43 @@ def TSI(bits, name=None, uninitialized=False, explicit_name=None):
 def ESI(bits, **kwargs):
     return BVV(None, bits, **kwargs)
 
-def ValueSet(**kwargs):
-    vs = vsa.ValueSet(**kwargs)
-    return BV('I', (vs,), variables={ vs.name }, symbolic=False, length=kwargs['bits'], eager_backends=None)
+def ValueSet(bits, region=None, region_base_addr=None, value=None, name=None, val=None):
+
+    # Backward compatibility
+    if value is None and val is not None:
+        value = val
+    if region_base_addr is None:
+        region_base_addr = 0
+
+    v = region_base_addr + value
+
+    # Backward compatibility
+    if isinstance(v, (int, long)):
+        min_v, max_v = v, v
+        stride = 0
+    elif isinstance(v, vsa.StridedInterval):
+        min_v, max_v = v.lower_bound, v.upper_bound
+        stride = v.stride
+    else:
+        raise ClaripyValueError("ValueSet() does not take `value` of type %s" % type(value))
+
+    bvs = BVS(name, bits, min=region_base_addr + min_v, max=region_base_addr + max_v, stride=stride)
+
+    # Annotate the bvs and return the new AST
+    vs = bvs.annotate(vsa.RegionAnnotation(region, region_base_addr, value))
+    return vs
+
 VS = ValueSet
+
+def DSIS(name=None, bits=0, lower_bound=None, upper_bound=None, stride=None, explicit_name=None, to_conv=None, max_card=None):
+
+    if to_conv is not None:
+        si = vsa.CreateStridedInterval(bits=to_conv.size(), to_conv=to_conv)
+        return SI(name=name, bits=si._bits, lower_bound=si._lower_bound, upper_bound=si._upper_bound, stride=si._stride,
+                   explicit_name=explicit_name, discrete_set=True, discrete_set_max_card=max_card)
+    else:
+        return SI(name=name, bits=bits, lower_bound=lower_bound, upper_bound=upper_bound, stride=stride,
+                   explicit_name=explicit_name, discrete_set=True, discrete_set_max_card=max_card)
 
 #
 # Unbound operations
@@ -202,6 +268,10 @@ SLT = operations.op('SLT', (BV, BV), Bool, extra_check=operations.length_same_ch
 SLE = operations.op('SLE', (BV, BV), Bool, extra_check=operations.length_same_check, bound=False)
 SGT = operations.op('SGT', (BV, BV), Bool, extra_check=operations.length_same_check, bound=False)
 SGE = operations.op('SGE', (BV, BV), Bool, extra_check=operations.length_same_check, bound=False)
+
+# division
+SDiv = operations.op('SDiv', (BV, BV), BV, extra_check=operations.length_same_check, bound=False, calc_length=operations.basic_length_calc)
+SMod = operations.op('SMod', (BV, BV), BV, extra_check=operations.length_same_check, bound=False, calc_length=operations.basic_length_calc)
 
 # bit stuff
 LShR = operations.op('LShR', (BV, BV), BV, extra_check=operations.length_same_check,
@@ -251,6 +321,8 @@ BV.__mod__ = operations.op('__mod__', (BV, BV), BV, extra_check=operations.lengt
 BV.__rmod__ = operations.reversed_op(BV.__mod__.im_func)
 BV.__divmod__ = operations.op('__divmod__', (BV, BV), BV, extra_check=operations.length_same_check, calc_length=operations.basic_length_calc)
 BV.__rdivmod__ = operations.reversed_op(BV.__divmod__.im_func)
+BV.SDiv = operations.op('SDiv', (BV, BV), BV, extra_check=operations.length_same_check, bound=False, calc_length=operations.basic_length_calc)
+BV.SMod = operations.op('SMod', (BV, BV), BV, extra_check=operations.length_same_check, bound=False, calc_length=operations.basic_length_calc)
 
 BV.__neg__ = operations.op('__neg__', (BV,), BV, calc_length=operations.basic_length_calc)
 BV.__pos__ = operations.op('__pos__', (BV,), BV, calc_length=operations.basic_length_calc)

@@ -14,6 +14,7 @@ from . import ops as _all_operations
 
 # This is here for later, because we'll fuck the namespace in a few lines
 from . import backends as _backends_module
+from .backends import Backend
 
 #
 # connect to ANA
@@ -21,7 +22,7 @@ from . import backends as _backends_module
 
 import ana
 if os.environ.get('REMOTE', False):
-    ana.set_dl(mongo_args=())
+    ana.set_dl(ana.MongoDataLayer(()))
 
 #
 # Some other misguided setup
@@ -32,14 +33,6 @@ l.warning("Claripy is setting the recursion limit to %d. If Python segfaults, I 
 sys.setrecursionlimit(_recurse)
 
 #
-# solvers
-#
-
-from .frontend import Frontend as _Frontend
-from .frontends import LightFrontend, FullFrontend, CompositeFrontend, HybridFrontend, ReplacementFrontend, hybrid_vsa_z3
-from .result import Result
-
-#
 # backend objects
 #
 
@@ -47,6 +40,7 @@ from . import bv
 from . import fp
 from . import vsa
 from .fp import FSORT_DOUBLE, FSORT_FLOAT
+from .annotation import *
 
 #
 # Operations
@@ -90,5 +84,11 @@ backends = _backend_manager.backends
 def downsize():
     backends.downsize()
 
-def Solver():
-    return hybrid_vsa_z3()
+#
+# Frontends
+#
+
+from .frontend import Frontend as _Frontend
+from . import frontends
+from . import frontend_mixins
+from .solvers import *

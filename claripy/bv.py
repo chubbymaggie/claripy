@@ -1,12 +1,24 @@
 import functools
-from .errors import ClaripyOperationError
+from .errors import ClaripyOperationError, ClaripyTypeError, ClaripyZeroDivisionError
 from .backend_object import BackendObject
 
 def compare_bits(f):
     @functools.wraps(f)
     def compare_guard(self, o):
+        if self.bits == 0 or o.bits == 0:
+            raise ClaripyTypeError("The operation is not allowed on zero-length bitvectors.")
+
         if self.bits != o.bits:
-            raise TypeError("bitvectors are differently-sized (%d and %d)" % (self.bits, o.bits))
+            raise ClaripyTypeError("bitvectors are differently-sized (%d and %d)" % (self.bits, o.bits))
+        return f(self, o)
+
+    return compare_guard
+
+def compare_bits_0_length(f):
+    @functools.wraps(f)
+    def compare_guard(self, o):
+        if self.bits != o.bits:
+            raise ClaripyTypeError("bitvectors are differently-sized (%d and %d)" % (self.bits, o.bits))
         return f(self, o)
 
     return compare_guard
@@ -31,8 +43,11 @@ class BVV(BackendObject):
     __slots__ = [ 'bits', '_value', 'mod', 'value' ]
 
     def __init__(self, value, bits):
-        if bits == 0 or type(bits) not in (int, long) or type(value) not in (int, long):
-            raise ClaripyOperationError("BVV needs a non-zero length and an int/long value")
+        if bits < 0 or type(bits) not in (int, long) or type(value) not in (int, long):
+            raise ClaripyOperationError("BVV needs a non-negative length and an int/long value")
+
+        if bits == 0 and value not in (0, "", None):
+            raise ClaripyOperationError("Zero-length BVVs cannot have a meaningful value.")
 
         self.bits = bits
         self._value = 0
@@ -88,12 +103,18 @@ class BVV(BackendObject):
     @normalize_types
     @compare_bits
     def __mod__(self, o):
-        return BVV(self.value % o.value, self.bits)
+        try:
+            return BVV(self.value % o.value, self.bits)
+        except ZeroDivisionError:
+            raise ClaripyZeroDivisionError()
 
     @normalize_types
     @compare_bits
     def __div__(self, o):
-        return BVV(self.value / o.value, self.bits)
+        try:
+            return BVV(self.value / o.value, self.bits)
+        except ZeroDivisionError:
+            raise ClaripyZeroDivisionError()
 
     #
     # Reverse arithmetic stuff
@@ -146,15 +167,25 @@ class BVV(BackendObject):
     @normalize_types
     @compare_bits
     def __lshift__(self, o):
-        return BVV(self.value << o.signed, self.bits)
+        if o.signed < self.bits:
+            return BVV(self.value << o.signed, self.bits)
+        else:
+            return BVV(0, self.bits)
 
     @normalize_types
     @compare_bits
     def __rshift__(self, o):
-        return BVV(self.signed >> o.signed, self.bits)
+        # arithmetic shift uses the signed version
+        if o.signed < self.bits:
+            return BVV(self.signed >> o.signed, self.bits)
+        else:
+            return BVV(0, self.bits)
 
     def __invert__(self):
         return BVV(self.value ^ self.mod-1, self.bits)
+
+    def __neg__(self):
+        return BVV((-self.value) % self.mod, self.bits)
 
     #
     # Reverse bit operations
@@ -190,12 +221,12 @@ class BVV(BackendObject):
     #
 
     @normalize_types
-    @compare_bits
+    @compare_bits_0_length
     def __eq__(self, o):
         return self.value == o.value
 
     @normalize_types
-    @compare_bits
+    @compare_bits_0_length
     def __ne__(self, o):
         return self.value != o.value
 
@@ -261,13 +292,47 @@ def RotateLeft(self, bits):
     return (self << bits) | (LShR(self, (self.size()-bits)))
 
 def Reverse(a):
-    if a.size() == 8:
+    size = a.size()
+    if size == 8:
         return a
-    elif a.size() % 8 != 0:
+    elif size % 8 != 0:
         raise ClaripyOperationError("can't reverse non-byte sized bitvectors")
     else:
-        return Concat(*[Extract(i+7, i, a) for i in range(0, a.size(), 8)])
+        value = a.value
+        out = 0
+        if size == 64:
+            out = _reverse_64(value)
+        elif size == 32:
+            out = _reverse_32(value)
+        elif size == 16:
+            out = _reverse_16(value)
+        else:
+            for i in xrange(0, size, 8):
+                out |= ((value & (0xff << i)) >> i) << (size - 8 - i)
+        return BVV(out, size)
 
+        # the RIGHT way to do it:
+        #return BVV(int(("%x" % a.value).rjust(size/4, '0').decode('hex')[::-1].encode('hex'), 16), size)
+
+def _reverse_16(v):
+    return ((v & 0xff) << 8) | \
+           ((v & 0xff00) >> 8)
+
+def _reverse_32(v):
+    return ((v & 0xff) << 24) | \
+           ((v & 0xff00) << 8) | \
+           ((v & 0xff0000) >> 8) | \
+           ((v & 0xff000000) >> 24)
+
+def _reverse_64(v):
+    return ((v & 0xff) << 56) | \
+           ((v & 0xff00) << 40) | \
+           ((v & 0xff0000) << 24) | \
+           ((v & 0xff000000) << 8) | \
+           ((v & 0xff00000000) >> 8) | \
+           ((v & 0xff0000000000) >> 24) | \
+           ((v & 0xff000000000000) >> 40) | \
+           ((v & 0xff00000000000000) >> 56)
 
 @normalize_types
 @compare_bits
@@ -309,6 +374,24 @@ def SLE(self, o):
 def SGE(self, o):
     return self.signed >= o.signed
 
+@normalize_types
+@compare_bits
+def SMod(self, o):
+    # compute the remainder like the % operator in C
+    a = self.signed
+    b = o.signed
+    division_result = a//b if a*b>0 else (a+(-a%b))//b
+    val = a - division_result*b
+    return BVV(val, self.bits)
+
+@normalize_types
+@compare_bits
+def SDiv(self, o):
+    # compute the round towards 0 division
+    a = self.signed
+    b = o.signed
+    val = a//b if a*b>0 else (a+(-a%b))//b
+    return BVV(val, self.bits)
 
 #
 # Pure boolean stuff
@@ -339,31 +422,3 @@ def If(c, t, f):
 @compare_bits
 def LShR(a, b):
     return BVV(a.value >> b.signed, a.bits)
-
-
-def test():
-    a = BVV(1, 8)
-    b = BVV(2, 8)
-    assert a | b == 3
-    assert a & b == 0
-    assert a / b == 0
-    assert b * b == 4
-    assert a.signed == a.value
-    assert a + 8 == 9
-
-    c = BVV(128, 8)
-    assert c.signed == -128
-
-    d = BVV(255, 8)
-    assert Extract(1, 0, d) == 3
-    assert SignExt(8, d).value == 2**16-1
-    assert ZeroExt(8, d).size() == 16
-    assert ZeroExt(8, d).value == 255
-
-    e = BVV(0b1010, 4)
-    f = BVV(0b11, 2)
-    assert Concat(e, e, e, e) == 0b1010101010101010
-    assert Concat(e,f,f) == 0b10101111
-
-if __name__ == '__main__':
-    test()

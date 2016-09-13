@@ -3,6 +3,16 @@ l = logging.getLogger('claripy.ast.bool')
 
 from ..ast.base import Base, _make_name
 
+_boolv_cache = dict()
+
+# This is a hilarious hack to get around some sort of bug in z3's python bindings, where
+# under some circumstances stuff gets destructed out of order
+def cleanup():
+    global _boolv_cache #pylint:disable=global-variable-not-assigned
+    del _boolv_cache
+import atexit
+atexit.register(cleanup)
+
 class Bool(Base):
     @staticmethod
     def _from_bool(like, val): #pylint:disable=unused-argument
@@ -10,7 +20,7 @@ class Bool(Base):
 
     def is_true(self):
         """
-        Returns True if 'self' can be easily determined to be True. Otherwise, return False. Note that the AST *might* 
+        Returns True if 'self' can be easily determined to be True. Otherwise, return False. Note that the AST *might*
         still be True (i.e., if it were simplified via Z3), but it's hard to quickly tell that.
         """
         return is_true(self)
@@ -22,31 +32,6 @@ class Bool(Base):
         """
         return is_false(self)
 
-    def _simplify_And(self):
-        new_args = [ ]
-        for a in self.args:
-            if is_false(a):
-                return BoolV(False)
-            elif not is_true(a):
-                new_args.append(a)
-
-        if len(new_args) == 0:
-            return BoolV(True)
-        else:
-            return Bool(self.op, new_args)
-
-    def _simplify_Or(self):
-        new_args = [ ]
-        for a in self.args:
-            if is_true(a):
-                return BoolV(False)
-            elif not is_false(a):
-                new_args.append(a)
-
-        if len(new_args) == 0:
-            return BoolV(False)
-        else:
-            return Bool(self.op, new_args)
 
 def BoolS(name, explicit_name=None):
     """
@@ -61,7 +46,11 @@ def BoolS(name, explicit_name=None):
     return Bool('BoolS', (n,), variables={n}, symbolic=True)
 
 def BoolV(val):
-    return Bool('BoolV', (val,))
+    try: return _boolv_cache[(val)]
+    except KeyError: pass
+    result = Bool('BoolV', (val,))
+    _boolv_cache[val] = result
+    return result
 
 #
 # some standard ASTs
@@ -101,6 +90,9 @@ def If(*args):
         ty = type(args[2])
     else:
         raise ClaripyTypeError("true/false clause of If must have bearable types")
+
+    if isinstance(args[1], Bits) and isinstance(args[2], Bits) and args[1].length != args[2].length:
+        raise ClaripyTypeError("sized arguments to If must have the same length")
 
     if not isinstance(args[1], ty):
         if hasattr(ty, '_from_' + type(args[1]).__name__):

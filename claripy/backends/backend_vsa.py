@@ -4,7 +4,8 @@ import operator
 
 l = logging.getLogger("claripy.backends.backend_vsa")
 
-from ..backend import Backend, BackendError
+from . import Backend, BackendError
+from ..vsa import RegionAnnotation
 
 def arg_filter(f):
     @functools.wraps(f)
@@ -30,42 +31,23 @@ def normalize_arg_order(f):
 
     return normalizer
 
-def normalize_reversed_arguments(f):
+def convert_args(f):
     @functools.wraps(f)
-    def normalizer(self, ast, result=None):
-        arg_reversed = []
+    def converter(self, ast):
         raw_args = []
         for i in xrange(len(ast.args)):
-            if isinstance(ast.args[i], Base) and \
-                            type(self.convert(ast.args[i])) in { #pylint:disable=unidiomatic-typecheck
-                                                    StridedInterval,
-                                                    DiscreteStridedIntervalSet,
-                                                    ValueSet
-            }:
-                if self.convert(ast.args[i]).reversed:
-                    arg_reversed.append(True)
-                    raw_args.append(ast.args[i].reversed)
-                    continue
-
             # It's not reversed
-            arg_reversed.append(False)
             raw_args.append(ast.args[i])
 
-        any_reversed_arg = any(arg_reversed)
         for i in xrange(len(raw_args)):
             raw_args[i] = self.convert(raw_args[i])
 
         normalized = ast.swap_args(raw_args)
-        ret = f(self, normalized, result=result)
-
-        # inner_i = I(args[0]._claripy, ret, variables=variables)
-        if any_reversed_arg:
-            return ret.reverse()
-            #ret = A(args[0]._claripy, 'Reverse', (inner_i,), variables=variables, collapsible=False)
+        ret = f(self, normalized)
 
         return ret
 
-    return normalizer
+    return converter
 
 class BackendVSA(Backend):
     def __init__(self):
@@ -83,10 +65,37 @@ class BackendVSA(Backend):
         self._op_expr['BoolV'] = self.BoolV
         self._op_expr['BVS'] = self.BVS
 
-    def convert(self, expr, result=None):
-        return Backend.convert(self, expr.ite_excavated if isinstance(expr, Base) else expr, result=result)
+        # reduceable
+        self._op_raw['__add__'] = self._op_add
+        self._op_raw['__sub__'] = self._op_sub
+        self._op_raw['__mul__'] = self._op_mul
+        self._op_raw['__or__'] = self._op_or
+        self._op_raw['__xor__'] = self._op_xor
+        self._op_raw['__and__'] = self._op_and
 
-    def _convert(self, a, result=None):
+    @staticmethod
+    def _op_add(*args):
+        return reduce(operator.__add__, args)
+    @staticmethod
+    def _op_sub(*args):
+        return reduce(operator.__sub__, args)
+    @staticmethod
+    def _op_mul(*args):
+        return reduce(operator.__mul__, args)
+    @staticmethod
+    def _op_or(*args):
+        return reduce(operator.__or__, args)
+    @staticmethod
+    def _op_xor(*args):
+        return reduce(operator.__xor__, args)
+    @staticmethod
+    def _op_and(*args):
+        return reduce(operator.__and__, args)
+
+    def convert(self, expr):
+        return Backend.convert(self, expr.ite_excavated if isinstance(expr, Base) else expr)
+
+    def _convert(self, a):
         if type(a) in { int, long }: #pylint:disable=unidiomatic-typecheck
             return a
         if type(a) is bool:
@@ -96,9 +105,10 @@ class BackendVSA(Backend):
         if isinstance(a, BoolResult):
             return a
 
-        raise BackendError("why is fish raising NotImplementedError INSTEAD OF THE ERROR THAT'S SUPPOSED TO BE RAISED IN THIS SITUATION? SERIOUSLY, JUST RAISE A BACKENDERROR AND EVERYONE WILL BE HAPPY, BUT NO, PEOPLE HAVE TO RAISE THEIR OWN ERRORS INSTEAD OF USING THE ERRORS THAT WERE ****DESIGNED**** FOR THIS SORT OF THING. WHY DO I BOTHER DESIGNING A GOOD ERROR HIERARCHY, ANYWAYS? WILL IT BE USED? NO! IT'LL BE ALL NotImplementedError('THIS') or Exception('THAT') AND EVERYTHING WILL MELT DOWN. UGH!")
+        # Not supported
+        raise BackendError()
 
-    def _eval(self, expr, n, result=None, solver=None, extra_constraints=()):
+    def _eval(self, expr, n, extra_constraints=(), solver=None, model_callback=None):
         if isinstance(expr, StridedInterval):
             return expr.eval(n)
         elif isinstance(expr, ValueSet):
@@ -113,7 +123,7 @@ class BackendVSA(Backend):
         else:
             raise BackendError('Unsupported type %s' % type(expr))
 
-    def _min(self, expr, result=None, solver=None, extra_constraints=()):
+    def _min(self, expr, extra_constraints=(), solver=None, model_callback=None):
         if isinstance(expr, StridedInterval):
             if expr.is_top:
                 # TODO: Return
@@ -123,7 +133,7 @@ class BackendVSA(Backend):
         else:
             raise BackendError('Unsupported expr type %s' % type(expr))
 
-    def _max(self, expr, result=None, solver=None, extra_constraints=()):
+    def _max(self, expr, extra_constraints=(), solver=None, model_callback=None):
         if isinstance(expr, StridedInterval):
             if expr.is_top:
                 # TODO:
@@ -134,7 +144,7 @@ class BackendVSA(Backend):
         else:
             raise BackendError('Unsupported expr type %s' % type(expr))
 
-    def _solution(self, obj, v, result=None, solver=None, extra_constraints=()):
+    def _solution(self, obj, v, extra_constraints=(), solver=None, model_callback=None):
         if isinstance(obj, BoolResult):
             return len(set(v.value) & set(obj.value)) > 0
 
@@ -149,16 +159,16 @@ class BackendVSA(Backend):
 
         raise NotImplementedError(type(obj).__name__)
 
-    def _has_true(self, o, extra_constraints=(), result=None, solver=None):
+    def _has_true(self, o, extra_constraints=(), solver=None, model_callback=None):
         return BoolResult.has_true(o)
 
-    def _has_false(self, o, extra_constraints=(), result=None, solver=None):
+    def _has_false(self, o, extra_constraints=(), solver=None, model_callback=None):
         return BoolResult.has_false(o)
 
-    def _is_true(self, o, extra_constraints=(), result=None, solver=None):
+    def _is_true(self, o, extra_constraints=(), solver=None, model_callback=None):
         return BoolResult.is_true(o)
 
-    def _is_false(self, o, extra_constraints=(), result=None, solver=None):
+    def _is_false(self, o, extra_constraints=(), solver=None, model_callback=None):
         return BoolResult.is_false(o)
 
     #
@@ -168,12 +178,12 @@ class BackendVSA(Backend):
     def simplify(self, e):
         raise BackendError('nope')
 
-    def _identical(self, a, b, result=None):
+    def _identical(self, a, b):
         if type(a) != type(b):
             return False
         return a.identical(b)
 
-    def _unique(self, obj, result=None): #pylint:disable=unused-argument,no-self-use
+    def _unique(self, obj): #pylint:disable=unused-argument,no-self-use
         if isinstance(obj, StridedInterval):
             return obj.unique
         elif isinstance(obj, ValueSet):
@@ -181,24 +191,47 @@ class BackendVSA(Backend):
         else:
             raise BackendError('Not supported type of operand %s' % type(obj))
 
-    def _cardinality(self, a, result=None): #pylint:disable=unused-argument,no-self-use
+    def _cardinality(self, a): #pylint:disable=unused-argument,no-self-use
         return a.cardinality
 
-    def name(self, a, result=None):
+    def name(self, a):
         if isinstance(a, StridedInterval):
             return a.name
 
         else:
             return None
 
-    def BVV(self, ast, result=None): #pylint:disable=unused-argument
+    def apply_annotation(self, bo, annotation):
+        """
+        Apply an annotation on the backend object.
+
+        :param BackendObject bo: The backend object.
+        :param Annotation annotation: The annotation to be applied
+        :return: A new BackendObject
+        :rtype: BackendObject
+        """
+
+        # Currently we only support RegionAnnotation
+
+        if not isinstance(annotation, RegionAnnotation):
+            return bo
+
+        if not isinstance(bo, ValueSet):
+            # Convert it to a ValueSet first
+            # Note that the original value is not kept at all. If you want to convert a StridedInterval to a ValueSet,
+            # you gotta do the conversion by calling AST.annotate() from outside.
+            bo = ValueSet.empty(bo.bits)
+
+        return bo.apply_annotation(annotation)
+
+    def BVV(self, ast): #pylint:disable=unused-argument,no-self-use
         if ast.args[0] is None:
             return StridedInterval.empty(ast.args[1])
         else:
-            return self.CreateStridedInterval(bits=ast.args[1], stride=0, lower_bound=ast.args[0], upper_bound=ast.args[0])
+            return CreateStridedInterval(bits=ast.args[1], stride=0, lower_bound=ast.args[0], upper_bound=ast.args[0])
 
     @staticmethod
-    def BoolV(ast, result=None): #pylint:disable=unused-argument
+    def BoolV(ast): #pylint:disable=unused-argument
         return TrueResult() if ast.args[0] else FalseResult()
 
     @staticmethod
@@ -250,10 +283,12 @@ class BackendVSA(Backend):
         return a.SGE(b)
 
     @staticmethod
-    def BVS(ast, result=None): #pylint:disable=unused-argument
+    def BVS(ast): #pylint:disable=unused-argument
         size = ast.size()
-        name, mn, mx, stride, uninitialized = ast.args
-        return CreateStridedInterval(name=name, bits=size, lower_bound=mn, upper_bound=mx, stride=stride, uninitialized=uninitialized)
+        name, mn, mx, stride, uninitialized, discrete_set, max_card = ast.args
+        return CreateStridedInterval(name=name, bits=size, lower_bound=mn, upper_bound=mx, stride=stride,
+                                     uninitialized=uninitialized, discrete_set=discrete_set,
+                                     discrete_set_max_cardinality=max_card)
 
     def If(self, cond, t, f):
         if not self.has_true(cond):
@@ -275,7 +310,7 @@ class BackendVSA(Backend):
         return first
 
     @staticmethod
-    def __rshift__(expr, shift_amount):
+    def __rshift__(expr, shift_amount): #pylint:disable=unexpected-special-method-signature
         return expr.__rshift__(shift_amount)
 
     @staticmethod
@@ -294,7 +329,7 @@ class BackendVSA(Backend):
         return ret
 
     @arg_filter
-    def _size(self, arg, result=None):
+    def _size(self, arg):
         if type(arg) in { StridedInterval, DiscreteStridedIntervalSet, ValueSet }: #pylint:disable=unidiomatic-typecheck
             return len(arg)
         else:
@@ -340,8 +375,8 @@ class BackendVSA(Backend):
 
         return arg.reverse()
 
-    @normalize_reversed_arguments
-    def union(self, ast, result=None): #pylint:disable=unused-argument,no-self-use
+    @convert_args
+    def union(self, ast): #pylint:disable=unused-argument,no-self-use
         if len(ast.args) != 2:
             raise BackendError('Incorrect number of arguments (%d) passed to BackendVSA.union().' % len(ast.args))
 
@@ -352,8 +387,8 @@ class BackendVSA(Backend):
 
         return ret
 
-    @normalize_reversed_arguments
-    def intersection(self, ast, result=None): #pylint:disable=unused-argument,no-self-use
+    @convert_args
+    def intersection(self, ast): #pylint:disable=unused-argument,no-self-use
         if len(ast.args) != 2:
             raise BackendError('Incorrect number of arguments (%d) passed to BackendVSA.intersection().' % len(ast.args))
 
@@ -366,8 +401,8 @@ class BackendVSA(Backend):
                 ret = ret.intersection(arg)
         return ret
 
-    @normalize_reversed_arguments
-    def widen(self, ast, result=None): #pylint:disable=unused-argument,no-self-use
+    @convert_args
+    def widen(self, ast): #pylint:disable=unused-argument,no-self-use
         if len(ast.args) != 2:
             raise BackendError('Incorrect number of arguments (%d) passed to BackendVSA.widen().' % len(ast.args))
 

@@ -1,3 +1,4 @@
+import operator
 import itertools
 def op(name, arg_types, return_type, extra_check=None, calc_length=None, do_coerce=True, bound=True): #pylint:disable=unused-argument
     if type(arg_types) in (tuple, list): #pylint:disable=unidiomatic-typecheck
@@ -44,8 +45,9 @@ def op(name, arg_types, return_type, extra_check=None, calc_length=None, do_coer
             if not success:
                 raise ClaripyOperationError(msg)
 
+        #pylint:disable=too-many-nested-blocks
         if name in simplifiers:
-            simp = simplifiers[name](*fixed_args)
+            simp = _handle_annotations(simplifiers[name](*fixed_args), args)
             if simp is not None:
                 return simp
 
@@ -64,6 +66,29 @@ def op(name, arg_types, return_type, extra_check=None, calc_length=None, do_coer
 
     _op.calc_length = calc_length
     return _op
+
+def _handle_annotations(simp, args):
+    if simp is None:
+        return None
+
+    ast_args = tuple(a for a in args if isinstance(a, ast.Base))
+
+    preserved_relocatable = frozenset(simp._relocatable_annotations)
+    relocated_annotations = set()
+    bad_eliminated = 0
+
+    for aa in ast_args:
+        for oa in aa._relocatable_annotations:
+            if oa not in preserved_relocatable and oa not in relocated_annotations:
+                relocated_annotations.add(oa)
+                na = oa.relocate(aa, simp)
+                if na is not None:
+                    simp = simp.append_annotation(na)
+
+        bad_eliminated += len(aa._uneliminatable_annotations - simp._uneliminatable_annotations)
+
+    if bad_eliminated == 0:
+        return simp
 
 def reversed_op(op_func):
     def _reversed_op(*args):
@@ -298,58 +323,92 @@ def boolean_reverse_simplifier(body):
                     return first_ast
                 else:
                     return first_ast[upper_bound:0]
+        if all(a.length == 8 for a in body.args):
+            return body.make_like(body.op, body.args[::-1])
 
 def boolean_and_simplifier(*args):
     if len(args) == 1:
         return args[0]
 
-    if any(a.is_true() for a in args):
-        new_args = tuple(a for a in args if not a.is_true())
-        if len(new_args) > 0:
-            return ast.all_operations.And(*new_args)
-        else:
-            return ast.all_operations.true
+    new_args = []
+    for a in args:
+        if a.is_false():
+            return ast.all_operations.false
+        elif not a.is_true():
+            new_args.append(a)
+
+    if len(new_args) < len(args):
+        return ast.all_operations.And(*new_args)
+
+    return _flatten_simplifier('And', *args)
 
 def boolean_or_simplifier(*args):
     if len(args) == 1:
         return args[0]
 
-    if any(a.is_false() for a in args):
-        new_args = tuple(a for a in args if not a.is_false())
-        if len(new_args) > 0:
-            return ast.all_operations.Or(*new_args)
-        else:
-            return ast.all_operations.false
+    new_args = []
+    for a in args:
+        if a.is_true():
+            return ast.all_operations.true
+        elif not a.is_false():
+            new_args.append(a)
+
+    if len(new_args) < len(args):
+        return ast.all_operations.Or(*new_args)
+
+    return _flatten_simplifier('Or', *args)
+
+def _flatten_simplifier(op_name, *args):
+    if not any(isinstance(a, ast.Base) and a.op == op_name for a in args):
+        return
+
+    # we cannot further flatten if any top-level argument has non-relocatable annotaitons
+    if any(not anno.relocatable for anno in itertools.chain.from_iterable(arg.annotations for arg in args)):
+        return
+
+    new_args = tuple(itertools.chain.from_iterable(
+        (a.args if isinstance(a, ast.Base) and a.op == op_name else (a,)) for a in args
+    ))
+    return next(a for a in args if isinstance(a, ast.Base)).make_like(op_name, new_args)
 
 def bitwise_add_simplifier(a, b):
-    if (a == 0).is_true():
+    if a is ast.all_operations.BVV(0, a.size()):
         return b
-    elif (b == 0).is_true():
+    elif b is ast.all_operations.BVV(0, a.size()):
         return a
 
+    return _flatten_simplifier('__add__', a, b)
+
+def bitwise_mul_simplifier(a, b):
+    return _flatten_simplifier('__mul__', a, b)
+
 def bitwise_sub_simplifier(a, b):
-    if (b == 0).is_true():
+    if b is ast.all_operations.BVV(0, a.size()):
         return a
     elif a is b or (a == b).is_true():
         return ast.all_operations.BVV(0, a.size())
 
 def bitwise_xor_simplifier(a, b):
-    if (a == 0).is_true():
+    if a is ast.all_operations.BVV(0, a.size()):
         return b
-    elif (b == 0).is_true():
+    elif b is ast.all_operations.BVV(0, a.size()):
         return a
     elif a is b or (a == b).is_true():
         return ast.all_operations.BVV(0, a.size())
 
+    return _flatten_simplifier('__xor__', a, b)
+
 def bitwise_or_simplifier(a, b):
-    if (a == 0).is_true():
+    if a is ast.all_operations.BVV(0, a.size()):
         return b
-    elif (b == 0).is_true():
+    elif b is ast.all_operations.BVV(0, a.size()):
         return a
     elif (a == b).is_true():
         return a
     elif a is b:
         return a
+
+    return _flatten_simplifier('__or__', a, b)
 
 def bitwise_and_simplifier(a, b):
     if (a == 2**a.size()-1).is_true():
@@ -360,6 +419,8 @@ def bitwise_and_simplifier(a, b):
         return a
     elif a is b:
         return a
+
+    return _flatten_simplifier('__and__', a, b)
 
 def boolean_not_simplifier(body):
     if body.op == '__eq__':
@@ -415,6 +476,9 @@ def extract_simplifier(high, low, val):
     if high - low + 1 == val.size():
         return val
 
+    if (val.op == 'SignExt' or val.op == 'ZeroExt') and low == 0 and high + 1 == val.args[1].size():
+        return val.args[1]
+
     if val.op == 'ZeroExt':
         extending_bits = val.args[0]
         if extending_bits == 0:
@@ -425,7 +489,7 @@ def extract_simplifier(high, low, val):
     # Reverse(concat(a, b)) -> concat(Reverse(b), Reverse(a))
     # a and b must have lengths that are a multiple of 8
     if val.op == 'Reverse' and val.args[0].op == 'Concat' and all(a.length % 8 == 0 for a in val.args[0].args):
-        val = ast.BV('Concat', tuple(reversed([a.reversed for a in val.args[0].args])), length=val.length)
+        val = ast.all_operations.Concat(*reversed([a.reversed for a in val.args[0].args]))
 
     # Reading one byte from a reversed ast can be converted to reading the corresponding byte from the original ast
     # No Reverse is required then
@@ -437,15 +501,15 @@ def extract_simplifier(high, low, val):
         high = (new_byte_pos + 1) * 8 - 1
         low = new_byte_pos * 8
 
-        return ast.BV('Extract', (high, low, val), length=high-low+1)
+        return ast.all_operations.Extract(high, low, val)
 
     if val.op == 'Concat':
         pos = val.length
         high_i, low_i, low_loc = None, None, None
         for i, v in enumerate(val.args):
-            if high in xrange(pos - v.length, pos):
+            if pos - v.length <= high < pos:
                 high_i = i
-            if low in xrange(pos - v.length, pos):
+            if pos - v.length <= low < pos:
                 low_i = i
                 low_loc = low - (pos - v.length)
             pos -= v.length
@@ -460,12 +524,12 @@ def extract_simplifier(high, low, val):
         if new_high == self.length - 1 and low_loc == 0:
             return self
         else:
-            # TODO: fallthrough
-            # does this cause infinite recursion?
             if self.op != 'Concat':
                 return self[new_high:low_loc]
             else:
-                return ast.BV('Extract', (new_high, low_loc, self), length=(new_high - low_loc + 1))
+                # to avoid infinite recursion we only return if something was simplified
+                if len(used) != len(val.args) or new_high != high or low_loc != low:
+                    return ast.all_operations.Extract(new_high, low_loc, self)
 
     if val.op == 'Extract':
         _, inner_low = val.args[:2]
@@ -490,8 +554,21 @@ def extract_simplifier(high, low, val):
     #         __import__('ipdb').set_trace()
 
     if val.op in extract_distributable:
-        return ast.BV(val.op, tuple(a[high:low] for a in val.args), length=(high-low+1))
+        all_args = tuple(a[high:low] for a in val.args)
+        return reduce(getattr(operator, val.op), all_args)
 
+# oh gods
+def fptobv_simplifier(the_fp):
+    if the_fp.op == 'fpToFP' and len(the_fp.args) == 2:
+        return the_fp.args[0]
+
+def fptofp_simplifier(*args):
+    if len(args) == 2 and args[0].op == 'fpToIEEEBV':
+        to_bv, sort = args
+        if sort == fp.FSORT_FLOAT and to_bv.length == 32:
+            return to_bv.args[0]
+        elif sort == fp.FSORT_DOUBLE and to_bv.length == 64:
+            return to_bv.args[0]
 
 simplifiers = {
     'Reverse': boolean_reverse_simplifier,
@@ -510,8 +587,11 @@ simplifiers = {
     '__xor__': bitwise_xor_simplifier,
     '__add__': bitwise_add_simplifier,
     '__sub__': bitwise_sub_simplifier,
+    '__mul__': bitwise_mul_simplifier,
     'ZeroExt': zeroext_simplifier,
     'SignExt': signext_simplifier,
+    'fpToIEEEBV': fptobv_simplifier,
+    'fpToFP': fptofp_simplifier,
 }
 
 #
@@ -558,25 +638,11 @@ expression_arithmetic_operations = {
     '__pow__', '__rpow__',
     '__mod__', '__rmod__',
     '__divmod__', '__rdivmod__',
+    'SDiv', 'SMod',
     '__neg__',
     '__pos__',
     '__abs__',
 }
-
-# expression_arithmetic_operations = {
-#     'Add', 'RAdd',
-#     'Div', 'RDiv',
-#     'TrueDiv', 'RTrueDiv',
-#     'FloorDiv', 'RFloorDiv',
-#     'Mul', 'RMul',
-#     'Sub', 'RSub',
-#     'Pow', 'RPow',
-#     'Mod', 'RMod',
-#     'DivMod', 'RDivMod',
-#     'Neg',
-#     'Pos',
-#     'Abs',
-# }
 
 bin_ops = {
     '__add__', '__radd__',
@@ -650,7 +716,10 @@ backend_vsa_creation_operations = {
 
 backend_other_operations = { 'If' }
 
-backend_operations = backend_comparator_operations | backend_bitwise_operations | backend_boolean_operations | backend_bitmod_operations | backend_creation_operations | backend_other_operations
+backend_arithmetic_operations = {'SDiv', 'SMod'}
+
+backend_operations = backend_comparator_operations | backend_bitwise_operations | backend_boolean_operations | \
+                     backend_bitmod_operations | backend_creation_operations | backend_other_operations | backend_arithmetic_operations
 backend_operations_vsa_compliant = backend_bitwise_operations | backend_comparator_operations | backend_boolean_operations | backend_bitmod_operations
 backend_operations_all = backend_operations | backend_operations_vsa_compliant | backend_vsa_creation_operations
 
@@ -730,6 +799,8 @@ length_change_operations = backend_bitmod_operations
 length_new_operations = backend_creation_operations
 
 leaf_operations = backend_symbol_creation_operations | backend_creation_operations
+leaf_operations_concrete = backend_creation_operations
+leaf_operations_symbolic = backend_symbol_creation_operations
 
 #
 # Reversibility
@@ -774,6 +845,9 @@ infix = {
     'SGT': '>s',
     'SLT': '<s',
 
+    'SDiv': "/s",
+    'SMod': "%s",
+
     '__or__': '|',
     '__and__': '&',
     '__xor__': '^',
@@ -786,8 +860,9 @@ infix = {
     'Concat': '..',
 }
 
-commutative_operations = { '__and__', '__or__', '__xor__', '__add__', '__mul__', }
+commutative_operations = { '__and__', '__or__', '__xor__', '__add__', '__mul__', 'And', 'Or', 'Xor', }
 
 from .errors import ClaripyOperationError, ClaripyTypeError
 from . import ast
+from . import fp
 from .backend_manager import backends

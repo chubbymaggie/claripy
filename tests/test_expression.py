@@ -24,6 +24,12 @@ def test_smudging():
     nose.tools.assert_equal(ccc.args[1].args[1].args[0], 2)
     nose.tools.assert_equal(ccc.args[1].args[1].args[1], 32)
 
+    x = claripy.BVS('x', 32)
+    y = x + "AAAA"
+    nose.tools.assert_true(isinstance(y.args[1], claripy.ast.BV))
+    nose.tools.assert_equal(y.args[1].args[0], 0x41414141)
+    nose.tools.assert_equal(y.args[1].args[1], 32)
+
 def test_expression():
     bc = claripy.backends.concrete
 
@@ -222,9 +228,9 @@ def test_if_stuff():
     nose.tools.assert_is(iii.ite_excavated, iiii)
 
 def test_ite():
-    yield raw_ite, lambda: claripy.FullFrontend(claripy.backends.z3)
-    yield raw_ite, claripy.hybrid_vsa_z3
-    yield raw_ite, lambda: claripy.CompositeFrontend(claripy.FullFrontend(claripy.backends.z3))
+    yield raw_ite, claripy.Solver
+    yield raw_ite, claripy.SolverHybrid
+    yield raw_ite, claripy.SolverComposite
 
 def raw_ite(solver_type):
     s = solver_type()
@@ -287,6 +293,10 @@ def test_extract():
     assert a[-1:] is a[31:0]
     assert a[-1:-8] is a[31:24]
 
+def test_get_byte():
+    a = claripy.BVV("ABCD")
+    assert a.get_byte(1) is claripy.BVV("B")
+
 def test_extract_concat_simplify():
     a = claripy.BVS("a", 32)
     assert a[31:0] is a
@@ -325,10 +335,155 @@ def test_depth_repr():
     y = claripy.LShR(y, 10)
     y = claripy.LShR(y, 10)
     y = claripy.LShR(y, 10)
-    print(y.shallow_repr(max_depth=5))
-    nose.tools.assert_equal(y.shallow_repr(max_depth=5), "<BV32 LShR(LShR(LShR(LShR(<...>, <...>), <...>), <...>), <...>)>")
+    print y.shallow_repr(max_depth=5)
+    nose.tools.assert_equal(y.shallow_repr(max_depth=5), "<BV32 LShR(LShR(LShR(LShR(LShR(<...>, <...>), 0xa), 0xa), 0xa), 0xa)>")
+
+def test_rename():
+    x1 = claripy.BVS('x', 32)
+    x2 = x1._rename('y')
+    print x2.variables
+    assert x2.variables == frozenset(('y',))
+
+def test_canonical():
+    x1 = claripy.BVS('x', 32)
+    b1 = claripy.BoolS('b')
+    c1 = claripy.BoolS('c')
+    x2 = claripy.BVS('x', 32)
+    b2 = claripy.BoolS('b')
+    c2 = claripy.BoolS('c')
+
+    assert x1.canonicalize()[-1] is x2.canonicalize()[-1]
+
+    y1 = claripy.If(claripy.And(b1, c1), x1, ((x1+x1)*x1)+1)
+    y2 = claripy.If(claripy.And(b2, c2), x2, ((x2+x2)*x2)+1)
+
+    one_names = frozenset.union(x1.variables, b1.variables, c1.variables)
+    two_names = frozenset.union(x2.variables, b2.variables, c2.variables)
+
+    assert frozenset.union(*[a.variables for a in y1.recursive_leaf_asts]) == one_names
+    assert frozenset.union(*[a.variables for a in y2.recursive_leaf_asts]) == two_names
+    assert y1.canonicalize()[-1] is y2.canonicalize()[-1]
+
+def test_depth():
+    x1 = claripy.BVS('x', 32)
+    assert x1.depth == 1
+    x2 = x1 + 1
+    assert x2.depth == 2
+
+def test_multiarg():
+    x = claripy.BVS('x', 32)
+    o = claripy.BVV(2, 32)
+
+    x_add = x+x+x+x
+    x_mul = x*x*x*x
+    x_sub = x-(x+1)-(x+2)-(x+3)
+    x_or = x|(x+1)|(x+2)|(x+3)
+    x_xor = x^(x+1)^(x+2)^(x+3)
+    x_and = x&(x+1)&(x+2)&(x+3)
+
+    assert x_add.variables == x.variables
+    assert x_mul.variables == x.variables
+    assert x_sub.variables == x.variables
+    assert x_or.variables == x.variables
+    assert x_xor.variables == x.variables
+    assert x_and.variables == x.variables
+    assert (claripy.BVV(1, 32)+(x+x)).variables == x.variables
+
+    assert len(x_add.args) == 4
+    assert len(x_mul.args) == 4
+    #assert len(x_sub.args) == 4 # needs more work
+    assert len(x_or.args) == 4
+    assert len(x_xor.args) == 4
+    assert len(x_and.args) == 4
+
+    assert (x_add).replace(x, o).args[0] == 8
+    assert (x_mul).replace(x, o).args[0] == 16
+    assert (x_or).replace(x, o).args[0] == 7
+    assert (x_xor).replace(x, o).args[0] == 0
+    assert (x_and).replace(x, o).args[0] == 0
+    assert (100 + (x_sub).replace(x, o)).args[0] == 90
+
+    # make sure that all backends handle this properly
+    for b in claripy.backends._all_backends:
+        try:
+            b.convert(x+x+x+x)
+        except claripy.BackendError:
+            pass
+    print 'ok'
+
+def test_signed_concrete():
+    bc = claripy.backends.concrete
+    a = claripy.BVV(5, 32)
+    b = claripy.BVV(-5, 32)
+    c = claripy.BVV(3, 32)
+    d = claripy.BVV(-3, 32)
+
+    # test unsigned
+    assert bc.convert(a / c) == 1
+    assert bc.convert(a / d) == 0
+    assert bc.convert(b / c) == 0x55555553
+    assert bc.convert(b / d) == 0
+    assert bc.convert(a % c) == 2
+    assert bc.convert(a % d) == 5
+    assert bc.convert(b % c) == 2
+    assert bc.convert(b % d) == -5
+
+    # test unsigned
+    assert bc.convert(a.SDiv(c)) == 1
+    assert bc.convert(a.SDiv(d)) == -1
+    assert bc.convert(b.SDiv(c)) == -1
+    assert bc.convert(b.SDiv(d)) == 1
+    assert bc.convert(a.SMod(c)) == 2
+    assert bc.convert(a.SMod(d)) == 2
+    assert bc.convert(b.SMod(c)) == -2
+    assert bc.convert(b.SMod(d)) == -2
+
+def test_signed_symbolic():
+    solver = claripy.Solver()
+    a = claripy.BVS("a", 32)
+    b = claripy.BVS("b", 32)
+    c = claripy.BVS("c", 32)
+    d = claripy.BVS("d", 32)
+    solver.add(a == 5)
+    solver.add(b == -5)
+    solver.add(c == 3)
+    solver.add(d == -3)
+
+    # test unsigned
+    assert list(solver.eval(a / c, 2)) == [1]
+    assert list(solver.eval(a / d, 2)) == [0]
+    assert list(solver.eval(b / c, 2)) == [0x55555553]
+    assert list(solver.eval(b / d, 2)) == [0]
+    assert list(solver.eval(a % c, 2)) == [2]
+    assert list(solver.eval(a % d, 2)) == [5]
+    assert list(solver.eval(b % c, 2)) == [2]
+    assert list(solver.eval(b % d, 2)) == [2**32-5]
+
+    # test unsigned
+    assert list(solver.eval(a.SDiv(c), 2)) == [1]
+    assert list(solver.eval(a.SDiv(d), 2)) == [2**32-1]
+    assert list(solver.eval(b.SDiv(c), 2)) == [2**32-1]
+    assert list(solver.eval(b.SDiv(d), 2)) == [1]
+    assert list(solver.eval(a.SMod(c), 2)) == [2]
+    assert list(solver.eval(a.SMod(d), 2)) == [2]
+    assert list(solver.eval(b.SMod(c), 2)) == [2**32-2]
+    assert list(solver.eval(b.SMod(d), 2)) == [2**32-2]
+
+def test_arith_shift():
+    bc = claripy.backends.concrete
+    a = claripy.BVV(-4, 32)
+    assert bc.convert(a >> 1) == -2
+
+    solver = claripy.Solver()
+    a = claripy.BVS("a", 32)
+    solver.add(a == -4)
+    assert list(solver.eval(a >> 1, 2)) == [2**32-2]
 
 if __name__ == '__main__':
+    test_multiarg()
+    test_depth()
+    test_rename()
+    test_canonical()
     test_depth_repr()
     test_extract()
     test_true_false_cache()
@@ -336,6 +491,10 @@ if __name__ == '__main__':
     test_expression()
     test_bool()
     test_extract_concat_simplify()
+    test_get_byte()
     for func, param in test_ite():
         func(param)
     test_if_stuff()
+    test_signed_concrete()
+    test_signed_symbolic()
+    test_arith_shift()

@@ -13,6 +13,9 @@ class ClaripySerializationError(ClaripyError):
 class BackendError(ClaripyError):
     pass
 
+class BackendUnsupportedError(BackendError):
+    pass
+
 class ClaripyZ3Error(ClaripyError):
     pass
 
@@ -48,4 +51,7 @@ class ClaripyReplacementError(ClaripyASTError):
     pass
 
 class ClaripyRecursionError(ClaripyOperationError):
+    pass
+
+class ClaripyZeroDivisionError(ClaripyOperationError, ZeroDivisionError):
     pass
